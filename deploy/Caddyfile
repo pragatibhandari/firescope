@@ -1,0 +1,6 @@
+# SITE_ADDRESS = your domain (e.g. firescope.example.com) -> automatic HTTPS certificate,
+# or ":80" to serve plain HTTP on the server's IP address.
+{$SITE_ADDRESS} {
+	encode gzip
+	reverse_proxy frontend:80
+}

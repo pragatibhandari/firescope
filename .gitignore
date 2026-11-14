@@ -1,0 +1,15 @@
+node_modules/
+dist/
+__pycache__/
+*.duckdb
+*.duckdb.wal
+backend/.env
+.pytest_cache/
+
+# Large NASA FIRMS downloads and exports (share via GitHub Releases / Zenodo, not in git)
+firms_data/
+*.zip
+exports/
+
+.env
+*.tsbuildinfo

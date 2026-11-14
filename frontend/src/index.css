@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+html, body, #root { height: 100%; }
+body { font-family: Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+.card { @apply bg-ink-850 border border-ink-700 rounded-xl; }
+.card-h { @apply text-[13px] font-semibold text-slate-100 tracking-tight; }
+.muted { @apply text-slate-400; }
+.btn { @apply inline-flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 hover:bg-ink-700 hover:border-ink-500 transition disabled:opacity-40 disabled:cursor-not-allowed; }
+.btn-primary { @apply btn bg-harm/90 border-harm text-white hover:bg-harm; }
+.input { @apply rounded-md border border-ink-600 bg-ink-900 px-2 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-harm/70; }
+.label { @apply text-[10px] uppercase tracking-wider text-slate-500 font-semibold; }
+.chip { @apply inline-flex items-center gap-1 rounded-full border border-ink-600 bg-ink-800 px-2 py-0.5 text-[11px]; }
+.seg { @apply inline-flex rounded-md border border-ink-600 overflow-hidden; }
+.seg > button { @apply px-2.5 py-1 text-xs text-slate-300 hover:bg-ink-700 border-r border-ink-600 last:border-r-0; }
+.seg > button.on { @apply bg-ink-600 text-white; }
+.prose-sci p { @apply text-sm leading-relaxed text-slate-300 mb-3; }
+.prose-sci h3 { @apply text-base font-semibold text-slate-100 mt-6 mb-2; }
+.prose-sci li { @apply text-sm leading-relaxed text-slate-300; }
+table.data { @apply w-full text-xs; }
+table.data th { @apply text-left font-semibold text-slate-400 border-b border-ink-700 py-1.5 px-2; }
+table.data td { @apply border-b border-ink-800 py-1.5 px-2 text-slate-300; }
+.maplibregl-popup-content { background: #0f1623 !important; color: #e2e8f0 !important; border: 1px solid #2a364c; border-radius: 10px !important; padding: 10px 12px !important; box-shadow: 0 10px 30px rgba(0,0,0,.5) !important; }
+.maplibregl-popup-tip { border-top-color: #2a364c !important; border-bottom-color: #2a364c !important; }
+.maplibregl-popup-close-button { color: #94a3b8; font-size: 16px; }
+.maplibregl-ctrl-group { background: #141c2b !important; }
+.maplibregl-ctrl-group button span { filter: invert(1); }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: #2a364c; border-radius: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
