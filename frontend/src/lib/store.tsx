@@ -8,7 +8,7 @@ export type AOI =
   | { kind: "polygon" | "geojson"; geometry: any; name?: string };
 
 export interface Filters {
-  dataset: "demo" | "live";
+  dataset: "live"; // real satellite data only
   start: string;
   end: string;
   sensors: string[];
@@ -47,6 +47,9 @@ interface Ctx {
   status: any;
   refreshStatus: () => void;
   body: (extra?: any) => any;
+  /** true while the cinematic intro owns the screen (sidebar + filter bar hidden) */
+  immersive: boolean;
+  setImmersive: (b: boolean) => void;
 }
 
 const C = createContext<Ctx>(null as any);
@@ -62,34 +65,43 @@ function readUrl(): { f?: Partial<Filters>; p?: Partial<HParams> } {
 export function StoreProvider({ children }: { children: React.ReactNode }) {
   const init = readUrl();
   const [filters, setF] = useState<Filters>({
-    dataset: "demo", start: "2024-01-01", end: "2024-12-31", sensors: ["MODIS", "VIIRS"], product: "all",
-    min_conf: "nominal", aoi: { kind: "world" }, exclude_static: true, ...(init.f || {}),
+    start: "2024-01-01", end: "2024-12-31", sensors: ["MODIS", "VIIRS"], product: "all",
+    min_conf: "nominal", aoi: { kind: "world" }, exclude_static: true, ...(init.f || {}), dataset: "live",
   });
   const [params, setP] = useState<HParams>({ ...DEFAULT_PARAMS, ...(init.p || {}) });
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [status, setStatus] = useState<any>(null);
-  const [datasetChosen, setDatasetChosen] = useState(!!init.f?.dataset);
+  const [datesChosen, setDatesChosen] = useState(!!init.f?.start);
+  const [immersive, setImmersive] = useState(false);
 
   const refreshStatus = useCallback(() => {
     apiGet("/api/status").then((s) => {
       setStatus(s);
-      if (!datasetChosen && s.default_dataset) { setF((f) => ({ ...f, dataset: s.default_dataset })); setDatasetChosen(true); }
+      // open on the most recent 90 days of real data (instead of a fixed old year)
+      if (!datesChosen) {
+        const cov = s.coverage?.live || [];
+        const last = s.live_last_observation
+          || cov.map((c: any) => String(c.last_date).slice(0, 10)).sort().slice(-1)[0];
+        if (last && /^\d{4}-\d{2}-\d{2}$/.test(String(last).slice(0, 10))) {
+          const end = String(last).slice(0, 10);
+          const d = new Date(end + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() - 89);
+          setF((f) => ({ ...f, start: d.toISOString().slice(0, 10), end }));
+        }
+        setDatesChosen(true);
+      }
     }).catch((e) => setStatus({ error: String(e) }));
-  }, [datasetChosen]);
+  }, [datesChosen]);
 
   useEffect(() => { refreshStatus(); const t = setInterval(refreshStatus, 30000); return () => clearInterval(t); }, [refreshStatus]);
-  // poll faster while the demo dataset is being built
-  useEffect(() => {
-    if (status?.demo === "building") { const t = setTimeout(() => { clearApiCache(); refreshStatus(); }, 4000); return () => clearTimeout(t); }
-  }, [status, refreshStatus]);
 
-  const setFilters = (f: Partial<Filters>) => { setF((o) => ({ ...o, ...f })); if (f.dataset) setDatasetChosen(true); };
+  const setFilters = (f: Partial<Filters>) => { setF((o) => ({ ...o, ...f, dataset: "live" })); if (f.start || f.end) setDatesChosen(true); };
   const setParams = (p: Partial<HParams>) => setP((o) => ({ ...o, ...p }));
 
   const value = useMemo<Ctx>(() => ({
     filters, setFilters, params, setParams, selectedDate, setSelectedDate, status, refreshStatus,
     body: (extra = {}) => ({ filters, params, ...extra }),
-  }), [filters, params, selectedDate, status, refreshStatus]);
+    immersive, setImmersive,
+  }), [filters, params, selectedDate, status, refreshStatus, immersive]);
   return <C.Provider value={value}>{children}</C.Provider>;
 }
 

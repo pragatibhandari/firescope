@@ -38,8 +38,36 @@ export function aoiLabel(a: any): string {
   if (a.name) return a.name;
   if (a.kind === "world") return "Global";
   if (a.kind === "country") return a.country;
-  if (a.kind === "bbox") return `BBox ${a.bbox.map((v: number) => v.toFixed(1)).join(", ")}`;
+  if (a.kind === "bbox") return `Selected area ${a.bbox.map((v: number) => v.toFixed(1)).join(", ")}`;
   return "Custom area";
+}
+
+/**
+ * Parse coordinates typed into a search box.
+ * "lat, lon"               -> a 1° x 1° box centred on the point (about 110 km across)
+ * "lat1, lon1, lat2, lon2" -> the box between two corners
+ * Returns null if the text is not coordinates.
+ */
+export function parseLatLon(q: string): { kind: "bbox"; bbox: [number, number, number, number]; name: string } | null {
+  if (!/^[\s\d.,;+\-°NSEWnsew]+$/.test(q) || !/\d/.test(q)) return null;
+  const toks = q.match(/[+-]?\d+(?:\.\d+)?\s*°?\s*[NSEWnsew]?/g) || [];
+  const vals = toks.map((t) => {
+    const v = parseFloat(t);
+    return /[SWsw]/.test(t) ? -Math.abs(v) : v;
+  });
+  const okLat = (v: number) => v >= -90 && v <= 90, okLon = (v: number) => v >= -180 && v <= 180;
+  if (vals.length === 2) {
+    const [lat, lon] = vals;
+    if (!okLat(lat) || !okLon(lon)) return null;
+    const d = 0.5;
+    return { kind: "bbox", bbox: [Math.max(-180, lon - d), Math.max(-90, lat - d), Math.min(180, lon + d), Math.min(90, lat + d)], name: `${lat.toFixed(2)}, ${lon.toFixed(2)} (±0.5°)` };
+  }
+  if (vals.length === 4) {
+    const [a, b, c, d] = vals;
+    if (![a, c].every(okLat) || ![b, d].every(okLon) || a === c || b === d) return null;
+    return { kind: "bbox", bbox: [Math.min(b, d), Math.min(a, c), Math.max(b, d), Math.max(a, c)], name: `${Math.min(a, c).toFixed(2)}…${Math.max(a, c).toFixed(2)}, ${Math.min(b, d).toFixed(2)}…${Math.max(b, d).toFixed(2)}` };
+  }
+  return null;
 }
 
 export function toCSV(rows: any[]): string {

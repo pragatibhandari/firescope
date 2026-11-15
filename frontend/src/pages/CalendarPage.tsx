@@ -107,7 +107,7 @@ export default function CalendarPage() {
             </>
           )}
         </div>
-        <DayPanel onOpenMap={() => nav("/map")} />
+        <DayPanel onOpenMap={() => nav("/")} />
       </div>
     </div>
   );

@@ -23,12 +23,14 @@ COUNTRIES_PATH = BASE_DIR / "data" / "countries.geojson"
 FIRMS_MAP_KEY = os.getenv("FIRMS_MAP_KEY", "").strip()
 FIRMS_BASE = os.getenv("FIRMS_BASE", "https://firms.modaps.eosdis.nasa.gov")
 
-# Build the clearly-labelled synthetic demo dataset on first start
-DEMO_ENABLED = os.getenv("FIRESCOPE_DEMO", "1") != "0"
+# The synthetic demo dataset is no longer used by the app (real satellite data only); kept for unit tests.
+DEMO_ENABLED = os.getenv("FIRESCOPE_DEMO", "0") == "1"
 DEMO_SEED = int(os.getenv("FIRESCOPE_DEMO_SEED", "42"))
 
 # Admin password for sync / upload / delete. Empty = no lock (local development only!)
 ADMIN_TOKEN = os.getenv("FIRESCOPE_ADMIN_TOKEN", "").strip()
+# Automatic near-real-time top-up from the NASA FIRMS API (needs FIRMS_MAP_KEY). 0 disables it.
+AUTOSYNC_HOURS = float(os.getenv("FIRESCOPE_AUTOSYNC_HOURS", "3"))
 
 CORS_ORIGINS = [o.strip() for o in os.getenv("FIRESCOPE_CORS", "*").split(",") if o.strip()]
 

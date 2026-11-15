@@ -36,13 +36,29 @@ def country_index():
     return sorted(out, key=lambda d: d["name"])
 
 
+def _unwrap_dateline(geom: dict) -> dict:
+    """Shift rings that cross the 180th meridian (e.g. Russia, Fiji) so no edge spans the whole map."""
+    def fix_ring(ring):
+        if any(abs(a[0] - b[0]) > 180 for a, b in zip(ring, ring[1:])):
+            return [[x + 360 if x < 0 else x, y] for x, y in ring]
+        return [list(p) for p in ring]
+    if geom["type"] == "Polygon":
+        return {"type": "Polygon", "coordinates": [fix_ring(r) for r in geom["coordinates"]]}
+    if geom["type"] == "MultiPolygon":
+        return {"type": "MultiPolygon", "coordinates": [[fix_ring(r) for r in poly] for poly in geom["coordinates"]]}
+    return geom
+
+
 @lru_cache(maxsize=1)
 def countries_geojson_simplified() -> dict:
+    """Display boundaries (simplified, dateline-safe; Antarctica omitted - it has no fire activity)."""
     names, geoms, _ = countries()
     feats = []
     for n, g in zip(names, geoms):
-        feats.append({"type": "Feature", "properties": {"name": n},
-                      "geometry": mapping(shapely.simplify(g, 0.05, preserve_topology=True))})
+        if n == "Antarctica":
+            continue
+        geom = mapping(shapely.simplify(g, 0.05, preserve_topology=True))
+        feats.append({"type": "Feature", "properties": {"name": n}, "geometry": _unwrap_dateline(geom)})
     return {"type": "FeatureCollection", "features": feats}
 
 

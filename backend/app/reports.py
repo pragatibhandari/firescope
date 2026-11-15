@@ -58,9 +58,6 @@ def build_pdf(ctx: dict) -> bytes:
     E = []
     k = ctx["summary"]["kpi"]
     E.append(Paragraph("FireScope - Burning Activity Intelligence Report", h1))
-    if ctx["dataset"] == "demo":
-        E.append(Paragraph("<b><font color='#b00020'>DEMONSTRATION DATA - SYNTHETIC, NOT SATELLITE OBSERVATIONS.</font></b> "
-                           "Figures in this report illustrate the method only.", body))
     E.append(Paragraph(f"<b>Area of interest:</b> {ctx['aoi_name']} &nbsp; <b>Period:</b> {ctx['start']} to {ctx['end']} &nbsp; "
                        f"<b>Generated:</b> {datetime.utcnow():%Y-%m-%d %H:%M} UTC", body))
     E.append(Paragraph(f"<b>Data sources:</b> {ctx['sources']}", body))

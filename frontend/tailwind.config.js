@@ -4,7 +4,7 @@ export default {
   theme: {
     extend: {
       colors: {
-        ink: { 950: "#070b13", 900: "#0b111c", 850: "#0f1623", 800: "#141c2b", 700: "#1c2638", 600: "#2a364c", 500: "#3d4a63" },
+        ink: { 950: "#03112b", 900: "#06183b", 850: "#08204c", 800: "#0a275c", 700: "#0b3d91", 600: "#2a55a8", 500: "#4a70bf" },
         modis: "#2f8fd8", viirs: "#d4b030", harm: "#e0552f", fire: "#ff7a3d",
       },
       fontFamily: { sans: ["Inter", "system-ui", "sans-serif"], mono: ["JetBrains Mono", "ui-monospace", "monospace"] },

@@ -55,7 +55,7 @@ def count(dataset: str) -> int:
 
 @dataclass
 class Filters:
-    dataset: str = "demo"
+    dataset: str = "live"  # real satellite data only (the synthetic demo dataset was removed)
     start: date | None = None
     end: date | None = None
     sensors: list[str] = field(default_factory=lambda: ["MODIS", "VIIRS"])
@@ -72,6 +72,7 @@ class Filters:
         for k, v in d.items():
             if hasattr(f, k) and v is not None:
                 setattr(f, k, v)
+        f.dataset = "live"
         if isinstance(f.start, str):
             f.start = date.fromisoformat(f.start[:10])
         if isinstance(f.end, str):

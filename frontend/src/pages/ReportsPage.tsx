@@ -14,7 +14,6 @@ export default function ReportsPage() {
   return (
     <div className="space-y-4">
       <PageHeader title="Reports & Data Export" desc="Every export embeds the dataset, AOI, period, filters and harmonisation parameters so the analysis can be reproduced exactly." />
-      {filters.dataset === "demo" && <div className="rounded-lg border border-fuchsia-900/50 bg-fuchsia-950/30 px-3 py-2 text-xs text-fuchsia-200">You are exporting the SYNTHETIC demo dataset. Every file is labelled as such.</div>}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Box icon={<FileText className="text-harm" />} t="PDF intelligence report" d="AOI, period, data sources, satellite contributions, harmonisation method & validation, burning calendar, historical comparison and trend test, anomalies, limitations, full parameter set.">
           <DownloadBtn label="Generate PDF" onClick={() => apiDownload("/api/report/pdf", body(), `firescope_report_${tag}.pdf`)} />

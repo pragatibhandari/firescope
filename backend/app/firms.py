@@ -68,7 +68,7 @@ def key_configured() -> bool:
 def mapkey_status(force=False) -> dict:
     if not FIRMS_MAP_KEY:
         return {"configured": False, "reachable": None,
-                "message": "No FIRMS_MAP_KEY set on the server. Running on uploaded or demo data only."}
+                "message": "No FIRMS_MAP_KEY set on the server. Running on uploaded satellite data only."}
     if not force and time.time() - _status_cache["t"] < 120 and _status_cache["value"]:
         return _status_cache["value"]
     try:
@@ -136,13 +136,13 @@ def _wait_for_quota(client: httpx.Client, job: dict, margin: float = 0.8):
         time.sleep(45)
 
 
-def start_area_sync(bbox: list[float], start: date, end: date, sensors: list[str]) -> str:
+def start_area_sync(bbox: list[float], start: date, end: date, sensors: list[str], chunk_days: int = 5) -> str:
     if not FIRMS_MAP_KEY:
         raise RuntimeError("FIRMS_MAP_KEY is not configured on the server")
     job_id = uuid.uuid4().hex[:10]
     JOBS[job_id] = {"id": job_id, "kind": "firms_area", "status": "queued", "progress": 0.0, "rows_added": 0,
                     "requests": 0, "errors": [], "params": {"bbox": bbox, "start": str(start), "end": str(end),
-                                                             "sensors": sensors},
+                                                             "sensors": sensors, "chunk_days": chunk_days},
                     "started_at": datetime.utcnow()}
     threading.Thread(target=_run_area_sync, args=(job_id,), daemon=True).start()
     return job_id
@@ -165,7 +165,7 @@ def _run_area_sync(job_id: str):
         for src, a, b in plan:
             d = a
             while d <= b:
-                n = min(5, (b - d).days + 1)
+                n = min(int(p.get("chunk_days", 5)), (b - d).days + 1)
                 chunks.append((src, d, n))
                 d += timedelta(days=n)
         job["total_requests"] = len(chunks)

@@ -13,3 +13,5 @@ exports/
 
 .env
 *.tsbuildinfo
+
+preview_cells.csv

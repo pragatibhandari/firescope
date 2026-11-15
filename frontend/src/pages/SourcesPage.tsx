@@ -61,7 +61,7 @@ export default function SourcesPage() {
   const f = status?.firms;
   return (
     <div className="space-y-4">
-      <PageHeader title="Data Sources & Integration" desc="NASA FIRMS is the primary source. The MAP_KEY lives only in the backend environment and is never sent to the browser. Without live access the platform runs on uploaded files or the clearly labelled synthetic demo dataset — it never fabricates satellite observations."
+      <PageHeader title="Data Sources & Integration" desc="NASA FIRMS is the primary source. The MAP_KEY lives only in the backend environment and is never sent to the browser. Without live access the platform runs on uploaded FIRMS files — it only ever shows real satellite observations."
         right={<button className="btn" onClick={refreshStatus}><RefreshCw size={13} /> Refresh status</button>} />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="card p-4">
@@ -73,7 +73,6 @@ export default function SourcesPage() {
             <tr><td>Last live observation</td><td className="font-mono">{status?.live_last_observation?.slice(0, 10) || "none"}</td></tr>
             <tr><td>Data freshness</td><td className="font-mono">{status?.live_freshness_hours != null ? `${fmt(status.live_freshness_hours, 1)} h old` : "–"}</td></tr>
             <tr><td>Last sync</td><td className="font-mono">{status?.sync_history?.[0]?.finished_at?.slice(0, 16) || "never"}</td></tr>
-            <tr><td>Demo dataset</td><td>{status?.demo} ({fmt(status?.demo_rows)} rows)</td></tr>
           </tbody></table>
           {!f?.configured && <p className="mt-2 text-[11px] text-slate-400">Set <code className="text-slate-200">FIRMS_MAP_KEY</code> in <code>backend/.env</code> (free key: firms.modaps.eosdis.nasa.gov/api/map_key) and restart the backend.</p>}
         </div>
@@ -162,7 +161,7 @@ export default function SourcesPage() {
         <div className="card-h mb-2">Data coverage in the platform</div>
         <div className="overflow-x-auto"><table className="data">
           <thead><tr><th>Dataset</th><th>Source</th><th>Sensor</th><th>Platform</th><th className="text-right">Records</th><th>First</th><th>Last</th><th>Last ingest (UTC)</th></tr></thead>
-          <tbody>{(status?.datasets || []).map((d: any, i: number) => <tr key={i}><td>{d.dataset === "demo" ? <span className="text-fuchsia-300">demo (synthetic)</span> : "live"}</td><td>{d.source}</td><td>{d.sensor}</td><td>{d.platform}</td><td className="text-right font-mono">{fmt(d.n)}</td><td className="font-mono">{d.first_date}</td><td className="font-mono">{d.last_date}</td><td className="font-mono">{String(d.last_ingest).slice(0, 16)}</td></tr>)}</tbody>
+          <tbody>{(status?.datasets || []).map((d: any, i: number) => <tr key={i}><td>{d.dataset}</td><td>{d.source}</td><td>{d.sensor}</td><td>{d.platform}</td><td className="text-right font-mono">{fmt(d.n)}</td><td className="font-mono">{d.first_date}</td><td className="font-mono">{d.last_date}</td><td className="font-mono">{String(d.last_ingest).slice(0, 16)}</td></tr>)}</tbody>
         </table></div>
         {isAdmin && (
           <div className="mt-2 flex gap-2">

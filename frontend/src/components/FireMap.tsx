@@ -24,6 +24,79 @@ export interface FireMapProps {
   onCountryClick?: (name: string) => void;
   height?: number | string;
   compact?: boolean;
+  /** Start as a 3D globe (used by the cinematic intro); the caller morphs it with morphToFlat(). */
+  startGlobe?: boolean;
+  /** Ignore fitTo while the intro animation owns the camera. */
+  holdCamera?: boolean;
+  initialView?: { center: [number, number]; zoom: number };
+  onMap?: (m: MLMap) => void;
+  onReady?: () => void; // all FireScope layers have been added
+  hideAttribution?: boolean; // the page shows its own data/attribution panel
+}
+
+/** Atmosphere + space colours for the globe view. */
+export const SPACE_SKY: any = {
+  "sky-color": "#070b13", "horizon-color": "#2a3f6b", "fog-color": "#0b111c",
+  "sky-horizon-blend": 0.6, "horizon-fog-blend": 0.8, "fog-ground-blend": 0.6,
+  "atmosphere-blend": ["interpolate", ["linear"], ["zoom"], 0, 1, 4, 1, 6, 0],
+};
+
+/**
+ * Smoothly unfold the globe into a flat world map (projection transition 0 -> 1),
+ * zooming so the whole world fits the container. Resolves when finished.
+ */
+/** Newly loaded hotspots fade in (opacity 0 -> normal) instead of popping onto the map. */
+function revealPoints(m: MLMap, ms = 1400) {
+  const set = (k: number) => {
+    try {
+      m.setPaintProperty("pts-glow", "circle-opacity", ["interpolate", ["linear"], ["zoom"], 0, 0.55 * k, 6, 0.3 * k, 10, 0.12 * k]);
+      m.setPaintProperty("pts-modis", "circle-opacity", k);
+      m.setPaintProperty("pts-modis", "circle-stroke-opacity", k);
+      m.setPaintProperty("pts-viirs", "circle-opacity", 0.9 * k);
+      m.setPaintProperty("pts-frp", "circle-opacity", 0.85 * k);
+    } catch { /* style not ready */ }
+  };
+  set(0);
+  const t0 = performance.now();
+  const step = (now: number) => {
+    const e = Math.min(1, (now - t0) / ms);
+    set(1 - Math.pow(1 - e, 3));
+    if (e < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function fitWorld(m: MLMap, duration: number) {
+  // whole world, leaving room for the floating control panel on the left
+  const wide = m.getContainer().clientWidth > 900;
+  m.fitBounds([[-168, -56], [180, 76]], { padding: { top: 70, bottom: 70, left: wide ? 290 : 20, right: 20 }, duration });
+}
+
+export function morphToFlat(m: MLMap, duration = 2600): Promise<void> {
+  return new Promise((resolve) => {
+    const c = m.getContainer();
+    const fromZoom = m.getZoom();
+    const toZoom = Math.max(0.6, Math.log2(c.clientWidth / 512) + 0.05);
+    const fromCenter = m.getCenter();
+    const toCenter = { lng: 12, lat: 18 };
+    const pp = m.getPadding();
+    const p0 = { top: pp.top ?? 0, bottom: pp.bottom ?? 0, left: pp.left ?? 0, right: pp.right ?? 0 };
+    const t0 = performance.now();
+    const ease = (x: number) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
+    const step = (now: number) => {
+      const x = Math.min(1, (now - t0) / duration);
+      const e = ease(x);
+      m.setProjection({ type: ["vertical-perspective", "mercator", e] as any });
+      m.jumpTo({
+        padding: { top: p0.top * (1 - e), bottom: p0.bottom * (1 - e), left: p0.left * (1 - e), right: p0.right * (1 - e) },
+        zoom: fromZoom + (toZoom - fromZoom) * e,
+        center: [fromCenter.lng + (toCenter.lng - fromCenter.lng) * e, fromCenter.lat + (toCenter.lat - fromCenter.lat) * e],
+      });
+      if (x < 1) requestAnimationFrame(step);
+      else { m.setProjection({ type: "mercator" }); resolve(); }
+    };
+    requestAnimationFrame(step);
+  });
 }
 
 // Basemap: OpenFreeMap "dark" vector style (free, no API key). If it cannot be reached, a plain dark
@@ -36,6 +109,66 @@ const FALLBACK_STYLE: any = {
   layers: [{ id: "bg", type: "background", paint: { "background-color": "#0b111c" } }],
 };
 let styleCache: any = null;
+
+/** Place names in English only (no second line in the local script) and in normal case, not ALL CAPS. */
+function englishLabels(style: any): any {
+  for (const l of style.layers || []) {
+    if (l.type !== "symbol" || !l.layout?.["text-field"]) continue;
+    if (!JSON.stringify(l.layout["text-field"]).includes("name")) continue; // keep road numbers etc.
+    l.layout["text-field"] = ["coalesce", ["get", "name_en"], ["get", "name:en"], ["get", "name:latin"], ["get", "name"]];
+    l.layout["text-transform"] = "none";
+  }
+  // declutter the world view: smaller places only appear as you zoom in
+  const MINZOOM: Record<string, number> = { place_other: 9, place_suburb: 10, place_village: 9, place_town: 7, place_city: 5.5, place_city_large: 3.5, place_state: 4.5 };
+  const layers: any[] = style.layers || [];
+  for (const l of layers) if (MINZOOM[l.id] != null) l.minzoom = Math.max(l.minzoom ?? 0, MINZOOM[l.id]);
+  // national capitals are labelled from the start (until regular city labels take over)
+  const city = layers.find((l) => l.id === "place_city_large") || layers.find((l) => l.id === "place_city");
+  const ci = layers.findIndex((l) => l.id.startsWith("place_country"));
+  if (city && ci > 0 && !layers.some((l) => l.id === "place_capital")) {
+    const cap = JSON.parse(JSON.stringify(city));
+    cap.id = "place_capital";
+    cap.minzoom = 1.5; cap.maxzoom = 5.5;
+    cap.filter = ["all", ["==", ["get", "class"], "city"], ["==", ["get", "capital"], 2]];
+    layers.splice(ci, 0, cap);
+  }
+  return style;
+}
+
+/**
+ * Earth colours: "color" = natural colours (blue oceans, green land, white ice) used while data loads;
+ * "dark" = the original dark basemap that makes the fire hotspots stand out. Changes fade smoothly.
+ */
+const EARTH_COLORS: Record<string, [string, string]> = {
+  background: ["background-color", "#3d5c3a"],
+  water: ["fill-color", "#0f4c81"],
+  waterway: ["line-color", "#0f4c81"],
+  landcover_wood: ["fill-color", "#2e5530"],
+  landuse_park: ["fill-color", "#3f6a3c"],
+  landuse_residential: ["fill-color", "#5a5a4a"],
+  landcover_glacier: ["fill-color", "#e6eef3"],
+  landcover_ice_shelf: ["fill-color", "#dce8f0"],
+  "boundary_country_z0-4": ["line-color", "#c9d6e2"],
+  "boundary_country_z5-": ["line-color", "#c9d6e2"],
+};
+const originalColors = new WeakMap<MLMap, Record<string, any>>();
+export function setEarthTheme(m: MLMap, theme: "color" | "dark", ms = 1500) {
+  const apply = () => {
+    let orig = originalColors.get(m);
+    if (!orig) { orig = {}; for (const [id, [prop]] of Object.entries(EARTH_COLORS)) if (m.getLayer(id)) orig[id] = m.getPaintProperty(id, prop as any); originalColors.set(m, orig); }
+    for (const [id, [prop, col]] of Object.entries(EARTH_COLORS)) {
+      if (!m.getLayer(id)) continue;
+      try {
+        m.setPaintProperty(id, `${prop}-transition` as any, { duration: ms, delay: 0 });
+        m.setPaintProperty(id, prop as any, theme === "color" ? col : orig[id]);
+      } catch { /* layer without this property */ }
+    }
+  };
+  // note: isStyleLoaded() stays false until all tiles are in, so check for the layers themselves
+  let has = false;
+  try { has = !!m.getLayer("background") || !!m.getLayer("water"); } catch { /* style not parsed yet */ }
+  if (has) apply(); else m.once("style.load", apply);
+}
 async function loadBaseStyle(): Promise<any> {
   if (styleCache) return styleCache;
   try {
@@ -44,12 +177,15 @@ async function loadBaseStyle(): Promise<any> {
     const r = await fetch(BASEMAP_URL, { signal: ctl.signal });
     clearTimeout(t);
     if (!r.ok) throw new Error(String(r.status));
-    styleCache = await r.json();
+    styleCache = englishLabels(await r.json());
   } catch {
     styleCache = FALLBACK_STYLE;
   }
   return styleCache;
 }
+
+// start fetching the basemap style as soon as the app loads, so the globe appears without delay
+loadBaseStyle();
 
 const EMPTY = { type: "FeatureCollection", features: [] };
 const INFERNO = ["#420a68", "#932667", "#dd513a", "#fca50a", "#fcffa4"];
@@ -69,6 +205,8 @@ function popupHtml(p: any) {
 export default function FireMap(props: FireMapProps) {
   const el = useRef<HTMLDivElement>(null);
   const map = useRef<MLMap | null>(null);
+  const shownPts = useRef<any>(null);
+  const worldFit = useRef(false); // true while showing the auto-fitted world view (re-fit on resize)
   const [ready, setReady] = useState(false);
   const drawPts = useRef<[number, number][]>([]);
   const propsRef = useRef(props);
@@ -77,15 +215,36 @@ export default function FireMap(props: FireMapProps) {
   useEffect(() => {
     let cancelled = false;
     let inst: MLMap | null = null;
+    let ro: ResizeObserver | null = null;
     loadBaseStyle().then((style) => {
     if (cancelled || !el.current) return;
-    const m = new maplibregl.Map({ container: el.current!, style, center: [10, 15], zoom: 1.3, maxZoom: 15, renderWorldCopies: false,
-      attributionControl: { compact: true, customAttribution: "Fire data: NASA FIRMS" } } as any);
+    const iv = propsRef.current.initialView || { center: [10, 15] as [number, number], zoom: 1.3 };
+    // with startGlobe the very first frame is already a globe (no flash of a flat map)
+    const st = propsRef.current.startGlobe ? { ...style, projection: { type: "globe" } } : style;
+    const m = new maplibregl.Map({ container: el.current!, style: st, center: iv.center, zoom: iv.zoom, maxZoom: 15, renderWorldCopies: false,
+      attributionControl: propsRef.current.hideAttribution ? false : { compact: true, customAttribution: "Fire data: NASA FIRMS" } } as any);
     map.current = m;
     inst = m;
+    propsRef.current.onMap?.(m); // camera can be framed and animated right away, before tiles/layers load
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     m.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-left");
-    m.on("load", async () => {
+    // keep the canvas sized correctly while the surrounding layout animates
+    ro = new ResizeObserver(() => {
+      try {
+        m.resize();
+        if (worldFit.current && !propsRef.current.holdCamera) fitWorld(m, 0);
+      } catch { /* map removed */ }
+    });
+    // any user pan/zoom ends the "auto world view"
+    m.on("movestart", (e: any) => { if (e.originalEvent) worldFit.current = false; });
+    ro.observe(el.current!);
+    m.on("style.load", () => {
+      if (propsRef.current.startGlobe) {
+        m.setProjection({ type: "globe" });
+        try { m.setSky(SPACE_SKY); } catch { /* older style spec */ }
+      }
+    });
+    m.once("style.load", async () => { // add layers as soon as the style is parsed (not after all tiles have loaded)
       m.addSource("countries", { type: "geojson", data: EMPTY as any });
       m.addLayer({ id: "countries-hit", type: "fill", source: "countries", paint: { "fill-color": "#000", "fill-opacity": 0 } });
       m.addLayer({ id: "countries-line", type: "line", source: "countries", paint: { "line-color": "#64748b", "line-width": 0.6, "line-opacity": 0.55 } });
@@ -106,6 +265,11 @@ export default function FireMap(props: FireMapProps) {
         "heatmap-opacity": 0.85,
         "heatmap-color": ["interpolate", ["linear"], ["heatmap-density"], 0, "rgba(0,0,0,0)", 0.15, INFERNO[0], 0.35, INFERNO[1], 0.55, INFERNO[2], 0.8, INFERNO[3], 1, INFERNO[4]] } });
       // MODIS: larger blue rings (1 km footprint); VIIRS: small gold dots (375 m) - shape AND colour differ
+      // soft glow under detections: makes fires "burn" at global scale and on the globe
+      m.addLayer({ id: "pts-glow", type: "circle", source: "pts", paint: {
+        "circle-radius": ["interpolate", ["linear"], ["zoom"], 0, 4, 3, 7, 8, 14],
+        "circle-color": ["interpolate", ["linear"], ["coalesce", ["get", "frp"], 5], 0, "#ff8a3d", 50, "#ff5a1f", 300, "#ffd166"],
+        "circle-blur": 1, "circle-opacity": ["interpolate", ["linear"], ["zoom"], 0, 0.55, 6, 0.3, 10, 0.12] } });
       m.addLayer({ id: "pts-modis", type: "circle", source: "pts", paint: {
         "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 2.4, 6, 4, 10, 7], "circle-color": "rgba(47,143,216,0.25)",
         "circle-stroke-color": "#2f8fd8", "circle-stroke-width": ["interpolate", ["linear"], ["zoom"], 1, 0.8, 8, 1.6] } });
@@ -157,9 +321,10 @@ export default function FireMap(props: FireMapProps) {
       });
       try { (m.getSource("countries") as GeoJSONSource).setData(await apiGet("/api/geo/countries")); } catch { /* offline */ }
       setReady(true);
+      propsRef.current.onReady?.();
     });
     });
-    return () => { cancelled = true; inst?.remove(); map.current = null; };
+    return () => { cancelled = true; ro?.disconnect(); inst?.remove(); map.current = null; };
   }, []);
 
   // drawing tools
@@ -212,7 +377,11 @@ export default function FireMap(props: FireMapProps) {
     const m = map.current;
     if (!m || !ready) return;
     const mode = props.mode || "combined";
-    (m.getSource("pts") as GeoJSONSource).setData(props.points || EMPTY);
+    const ptsSrc = m.getSource("pts") as GeoJSONSource;
+    // fade hotspots in when they first appear; later (streaming) updates just add to the map
+    if (props.points?.features?.length && !shownPts.current?.features?.length) revealPoints(m);
+    shownPts.current = props.points;
+    ptsSrc.setData(props.points || EMPTY);
     (m.getSource("ptsc") as GeoJSONSource).setData(props.cluster ? props.points || EMPTY : EMPTY);
     (m.getSource("density") as GeoJSONSource).setData(props.density || EMPTY);
     (m.getSource("recurrence") as GeoJSONSource).setData(props.recurrence || EMPTY);
@@ -227,6 +396,7 @@ export default function FireMap(props: FireMapProps) {
     vis("pts-viirs", ptsMode && showV && mode !== "intensity");
     vis("pts-frp", ptsMode && mode === "intensity");
     vis("heat", !!props.heat && mode !== "density");
+    vis("pts-glow", ptsMode && mode !== "intensity" && (showM || showV));
     vis("density", mode === "harmonized" && !!props.density);
     vis("recurrence", mode === "density");
     for (const id of ["clusters", "cluster-count", "cluster-pt"]) vis(id, !!props.cluster && mode !== "density");
@@ -237,16 +407,23 @@ export default function FireMap(props: FireMapProps) {
     m.setFilter("pts-viirs", ["all", ["==", ["get", "sensor"], "VIIRS"], tF]);
     m.setFilter("pts-frp", ["all", sensorF, tF, ...(props.showModis === false ? [["!=", ["get", "sensor"], "MODIS"]] : []), ...(props.showViirs === false ? [["!=", ["get", "sensor"], "VIIRS"]] : [])] as any);
     m.setFilter("heat", ["all", sensorF, tF] as any);
+    m.setFilter("pts-glow", ["all", tF, ...(!showM ? [["!=", ["get", "sensor"], "MODIS"]] : []), ...(!showV ? [["!=", ["get", "sensor"], "VIIRS"]] : [])] as any);
   }, [ready, props.points, props.density, props.recurrence, props.aoiGeom, props.mode, props.cluster, props.heat, props.showModis, props.showViirs, props.showBoundaries, props.dRange]);
 
   useEffect(() => {
     const m = map.current;
-    if (!m || !ready || !props.fitTo) return;
+    if (!m || !ready || !props.fitTo || props.holdCamera) return;
     const [w, s, e, n] = props.fitTo;
     if ([w, s, e, n].some((v) => !Number.isFinite(v))) return;
-    if (e - w > 300) { m.easeTo({ center: [10, 15], zoom: 1.3 }); return; }
+    if (e - w > 300) {
+      // whole world, leaving room for the floating control panel on the left
+      worldFit.current = true;
+      fitWorld(m, 900);
+      return;
+    }
+    worldFit.current = false;
     m.fitBounds([[w, s], [e, n]], { padding: 40, maxZoom: 9, duration: 700 });
-  }, [ready, JSON.stringify(props.fitTo)]);
+  }, [ready, JSON.stringify(props.fitTo), props.holdCamera]);
 
   return <div ref={el} style={{ height: props.height ?? "100%", width: "100%" }} className="overflow-hidden rounded-xl border border-ink-700" />;
 }

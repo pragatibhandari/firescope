@@ -1,11 +1,16 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Clock, Layers, Pause, Play, Square, Spline, X } from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import type { Map as MLMap } from "maplibre-gl";
+import { Layers, Square, X } from "lucide-react";
 import clsx from "clsx";
-import FireMap, { DrawMode, MapMode } from "../components/FireMap";
-import { useApi } from "../lib/api";
+import FireMap, { DrawMode, MapMode, setEarthTheme } from "../components/FireMap";
+import { CountUp, Starfield } from "../components/IntroOverlay";
+import { FloatingStory, LoadingText, LoadStep } from "../components/StoryPanel";
+import { FeatureStream } from "../lib/streamFeatures";
+import { DataInfo } from "../components/DataInfo";
+import { useApi, Progress } from "../lib/api";
 import { useStore } from "../lib/store";
-import { addDays, aoiLabel, fmt } from "../lib/format";
-import { InfoTip } from "../components/ui";
+import { aoiLabel, fmt } from "../lib/format";
+import { AreaSearch } from "../components/Layout";
 
 const MODES: { v: MapMode; l: string; d: string }[] = [
   { v: "modis", l: "Raw MODIS", d: "Individual MODIS detections (1 km pixels, blue rings)." },
@@ -48,8 +53,18 @@ export function aoiBbox(aoi: any, regions: any[] = REGIONS): [number, number, nu
   return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
 }
 
+let STORY_SHOWN = false; // the wildfire facts accompany only the first load of a visit
+
 export default function MapPage() {
-  const { body, filters, setFilters, selectedDate, setSelectedDate } = useStore();
+  const { body, filters, setFilters, selectedDate, setSelectedDate, status } = useStore();
+  const reduceMotion = typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const [mapReady, setMapReady] = useState(false);
+  const [dl, setDl] = useState<Progress | null>(null);
+  const firstLoad = useRef(!STORY_SHOWN);
+  const [storyOpen, setStoryOpen] = useState(!STORY_SHOWN); // open during the first load, then tucked away (arrow tab)
+  const mapRef = useRef<MLMap | null>(null);
+  const userMoved = useRef(false); // user zoomed/panned away from the framed globe
+  const baseZoom = useRef(1.5);
   const [mode, setMode] = useState<MapMode>("combined");
   const [showM, setShowM] = useState(true);
   const [showV, setShowV] = useState(true);
@@ -57,50 +72,197 @@ export default function MapPage() {
   const [cluster, setCluster] = useState(false);
   const [bounds, setBounds] = useState(true);
   const [draw, setDraw] = useState<DrawMode>("none");
-  const [gran, setGran] = useState<"day" | "week" | "month" | "year">("week");
-  const [step, setStep] = useState<number | null>(null);
-  const [playing, setPlaying] = useState(false);
-  const [showTime, setShowTime] = useState(false);
-  const pts = useApi<any>(mode === "density" ? null : "/api/points", body());
-  const dens = useApi<any>(mode === "harmonized" ? "/api/density" : null, body());
-  const rec = useApi<any>(mode === "density" ? "/api/recurrence" : null, body());
+  const gate = !!status && !status.error;
+  const isWorld = filters.aoi.kind === "world";
+  // hotspots are parsed while they download and drawn on the globe in real time
+  const lastDl = useRef(0);
+  const stream = useRef<FeatureStream | null>(null);
+  const [partial, setPartial] = useState<any>(null);
+  const onDl = (p: Progress) => {
+    if (p.received === 0 || !stream.current) stream.current = new FeatureStream();
+    if (p.chunk) stream.current.push(p.chunk);
+    const now = performance.now(); // throttle UI updates: chunks arrive every few ms
+    if (now - lastDl.current > 500 || (p.total && p.received >= p.total)) {
+      lastDl.current = now;
+      setDl(p);
+      if (stream.current.features.length) setPartial({ type: "FeatureCollection", features: stream.current.features.slice() });
+    }
+  };
+  const pts = useApi<any>(gate && mode !== "density" ? "/api/points" : null, body(), onDl);
+  const summary = useApi<any>(gate && (pts.data || mode === "density") ? "/api/summary" : null, body());
+  const dens = useApi<any>(gate && mode === "harmonized" ? "/api/density" : null, body());
+  const rec = useApi<any>(gate && mode === "density" ? "/api/recurrence" : null, body());
+  const loadErr = status?.error ? "Satellite data is temporarily unavailable." : pts.error ? "Satellite data is temporarily unavailable." : null;
+  useEffect(() => { if (pts.loading) { setDl(null); setPartial(null); } else { setPartial(null); stream.current = null; } }, [pts.loading]);
+  const shownPoints = pts.loading && partial?.features?.length ? partial : pts.data;
+
+  // ---------------- globe framing: a perfect circle sized to the free space, recomputed on resize ----------------
+  const boost = useRef(0); // extra zoom once the data is in: the globe grows a little after the intro spin
+  const fastSpin = useRef(false);
+  const [globe, setGlobe] = useState<{ cx: number; cy: number; r: number; W: number; H: number } | null>(null);
+  const frame = (m: MLMap, animate: boolean) => {
+    const c = m.getContainer(), W = c.clientWidth, H = c.clientHeight;
+    const wide = W > 900;
+    // a large, horizontally centred globe; the side columns keep room for the facts and loading text
+    const side = wide ? Math.max(240, Math.min(300, W * 0.22)) : 12;
+    const T = 78, B = 26;
+    const D = Math.max(220, Math.min(W - 2 * side, H - T - B));
+    const zoom = Math.log2((D * Math.PI) / 512) + boost.current;
+    baseZoom.current = zoom;
+    // padding top/bottom only: the globe sits centred horizontally, between the KPI row and the bottom edge
+    setGlobe({ cx: W / 2, cy: T + (H - T - B) / 2, r: (D / 2) * Math.pow(2, boost.current), W, H });
+    const opts = { zoom, padding: { top: T, bottom: B, left: 0, right: 0 }, center: [m.getCenter().lng, 12] as [number, number] };
+    if (animate) m.easeTo({ ...opts, duration: 1100 }); else m.jumpTo(opts);
+  };
+  useEffect(() => {
+    if (!mapReady) return;
+    const m = mapRef.current!;
+    const onMove = (e: any) => { if (e.originalEvent && (e.type === "zoomstart" || e.originalEvent.type === "wheel")) userMoved.current = true; };
+    const onResize = () => { if (isWorld && !userMoved.current) frame(m, false); };
+    m.on("zoomstart", onMove); m.on("resize", onResize);
+    return () => { m.off("zoomstart", onMove); m.off("resize", onResize); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapReady, isWorld]);
+  // back to the whole world -> re-frame the globe
+  useEffect(() => {
+    if (!mapReady || !isWorld) return;
+    userMoved.current = false;
+    frame(mapRef.current!, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapReady, isWorld]);
+
+  // slow rotation for the whole-world view; pauses while the user interacts or zooms in
+  useEffect(() => {
+    if (!mapReady || reduceMotion || !isWorld || draw !== "none") return;
+    const m = mapRef.current!;
+    let raf = 0, last = performance.now(), holdUntil = 0;
+    const hold = () => { holdUntil = performance.now() + 6000; };
+    m.on("mousedown", hold); m.on("touchstart", hold); m.on("wheel", hold);
+    const spin = (now: number) => {
+      raf = requestAnimationFrame(spin);
+      const dt = Math.min(0.1, (now - last) / 1000); last = now;
+      if (fastSpin.current || now < holdUntil || m.isMoving() || m.getZoom() > baseZoom.current + 0.35) return;
+      const c = m.getCenter();
+      m.jumpTo({ center: [(((c.lng + dt * 5) + 540) % 360) - 180, c.lat] }); // 5 degrees per second
+    };
+    raf = requestAnimationFrame(spin);
+    return () => { cancelAnimationFrame(raf); m.off("mousedown", hold); m.off("touchstart", hold); m.off("wheel", hold); };
+  }, [mapReady, reduceMotion, isWorld, draw]);
+
+  // natural-colour Earth (blue oceans, green land, white ice), kept after the data has loaded
+  useEffect(() => { if (mapReady) setEarthTheme(mapRef.current!, "color", 0); }, [mapReady]);
+
+  // real data arrived (first load): facts fade away, the globe makes one fast revolution and settles a little bigger
+  const pulsed = useRef<any>(null);
+  useEffect(() => {
+    if (!mapReady || !pts.data || pulsed.current === pts.data) return;
+    pulsed.current = pts.data;
+    if (!firstLoad.current) return;
+    firstLoad.current = false;
+    STORY_SHOWN = true;
+    setTimeout(() => setStoryOpen(false), 300);
+    const m = mapRef.current!;
+    if (reduceMotion || !isWorld || userMoved.current) return;
+    const GROW = 0.14; // after the full turn, zoom in: the globe ends ~10% larger
+    const z0 = m.getZoom(), c0 = m.getCenter(), dur = 2600, t0 = performance.now();
+    const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+    let raf = 0;
+    fastSpin.current = true;
+    const step = (now: number) => {
+      const k = Math.min(1, (now - t0) / dur), e = ease(k);
+      m.jumpTo({ center: [((c0.lng + 360 * e + 540) % 360) - 180, c0.lat], zoom: z0 });
+      if (k < 1) { raf = requestAnimationFrame(step); return; }
+      // one full revolution done: now zoom in a little and settle
+      m.easeTo({ zoom: baseZoom.current + GROW, duration: 1400, easing: (t) => 1 - Math.pow(1 - t, 3) });
+      setTimeout(() => {
+        boost.current = GROW; baseZoom.current += GROW; fastSpin.current = false;
+        setGlobe((g) => (g ? { ...g, r: g.r * Math.pow(2, GROW) } : g)); // keep the facts clear of the larger globe
+      }, 1450);
+    };
+    const t = setTimeout(() => { raf = requestAnimationFrame(step); }, 500); // start as the facts fade out
+    return () => { clearTimeout(t); cancelAnimationFrame(raf); fastSpin.current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapReady, pts.data]);
+
+  // ---------------- loading steps (each ticks only when it has really happened) ----------------
+  const [rendered, setRendered] = useState<any>(null); // the points object that the map has finished processing
+  useEffect(() => {
+    if (!mapReady || !pts.data) return;
+    const m = mapRef.current!;
+    const t = setInterval(() => { try { if (m.isSourceLoaded("pts")) { setRendered(pts.data); clearInterval(t); } } catch { /* */ } }, 120);
+    return () => clearInterval(t);
+  }, [mapReady, pts.data]);
+  const counts = useMemo(() => {
+    if (!pts.data?.features) return null;
+    let mo = 0, vi = 0;
+    for (const f of pts.data.features) (f.properties.sensor === "MODIS" ? mo++ : vi++);
+    return { mo, vi };
+  }, [pts.data]);
+  const mb = (b: number) => (b / 1048576).toFixed(1);
+  const needPts = mode !== "density";
+  const ptsDone = !needPts || (!!pts.data && !pts.loading);
+  const isRendered = !needPts || (ptsDone && rendered === pts.data);
+  const statsDone = ptsDone && !!summary.data && !summary.loading && !dens.loading && !rec.loading;
+  const steps: LoadStep[] = [
+    { label: "3D globe ready", done: mapReady },
+    { label: "Connected to NASA FIRMS archive", detail: status?.live_last_observation ? `observations up to ${status.live_last_observation}` : undefined, done: gate },
+    { label: `Querying ${filters.sensors.join(" + ")} hotspots`, detail: `${filters.start} → ${filters.end} · ${aoiLabel(filters.aoi)}`, done: ptsDone || !!dl },
+    { label: "Downloading fire detections", detail: dl ? `${mb(dl.received)}${dl.total ? " / " + mb(dl.total) : ""} MB${partial?.features?.length ? ` · ${fmt(partial.features.length)} on the globe` : ""}` : undefined, done: ptsDone },
+    { label: "Processing geographic data", detail: counts && ptsDone ? `${fmt(counts.mo)} MODIS · ${fmt(counts.vi)} VIIRS detections` : undefined, done: ptsDone && (!needPts || !!counts) },
+    { label: "Rendering fire hotspots on the globe", done: isRendered },
+    { label: "Computing harmonised statistics", detail: summary.data?.kpi ? `${fmt(summary.data.kpi.total_detections)} detections in total` : undefined, done: statsDone },
+  ];
+  const W8 = [5, 10, 20, 35, 5, 10, 15];
+  const percent = steps.reduce((acc, st, i) => acc + (st.done ? W8[i] : 0), 0)
+    + (!ptsDone && dl?.total ? W8[3] * Math.min(0.99, dl.received / dl.total) : 0);
+  const loadingVisible = !steps.every((x) => x.done) || !!loadErr;
+
+
   const countryIdx = useRegions();
 
-  const nDays = Math.max(1, Math.round((Date.parse(filters.end) - Date.parse(filters.start)) / 864e5) + 1);
-  const win = { day: 1, week: 7, month: 30, year: 365 }[gran];
-  const nSteps = Math.max(1, Math.ceil(nDays / win));
-  useEffect(() => { if (!playing) return; const t = setInterval(() => setStep((s) => ((s ?? -1) + 1) % nSteps), 750); return () => clearInterval(t); }, [playing, nSteps]);
-  useEffect(() => { setStep(null); setPlaying(false); }, [filters.start, filters.end, gran]);
-
   let dRange: [number, number] | null = null;
-  let timeLabel = `${filters.start} → ${filters.end}`;
-  if (selectedDate && step === null) {
+  if (selectedDate) {
     const d = Math.round((Date.parse(selectedDate) - Date.parse(filters.start)) / 864e5);
-    dRange = [d, d]; timeLabel = `Selected day ${selectedDate}`;
-  } else if (step !== null) {
-    dRange = [step * win, step * win + win - 1];
-    timeLabel = `${addDays(filters.start, dRange[0])} → ${addDays(filters.start, Math.min(nDays - 1, dRange[1]))}`;
+    dRange = [d, d];
   }
-  const hist = useMemo(() => {
-    if (!pts.data?.features?.length || nSteps < 2 || nSteps > 400) return null;
-    const counts = new Array(nSteps).fill(0);
-    for (const f of pts.data.features) { const i = Math.floor(f.properties.d / win); if (i >= 0 && i < nSteps) counts[i]++; }
-    return { counts, max: Math.max(1, ...counts) };
-  }, [pts.data, nSteps, win]);
-  const status = pts.loading || dens.loading || rec.loading ? <span className="text-harm">Loading…</span> : mode === "density" && rec.data ? <span>Recurrence over {rec.data.n_years} years · {rec.data.cell_deg}° cells</span> : pts.data ? (
-    <span>{fmt(pts.data.total)} detections{pts.data.sampled && <> · sample of {fmt(pts.data.features.length)} shown <InfoTip text="Large selections are sampled server-side to keep the browser responsive; counts and analytics always use all records. Zoom into a smaller AOI or shorter period for every point." /></>}</span>
-  ) : null;
   const fit = useMemo(() => aoiBbox(filters.aoi, countryIdx), [JSON.stringify(filters.aoi), countryIdx.length]);
   const aoiGeom = useMemo(() => aoiGeometry(filters.aoi), [JSON.stringify(filters.aoi)]);
 
   return (
-    <div className="relative h-[calc(100vh-150px)] min-h-[560px]">
-      <FireMap points={pts.data} density={dens.data} recurrence={rec.data} aoiGeom={aoiGeom} mode={mode} cluster={cluster} heat={heat}
+    <div className="relative h-full min-h-[560px] overflow-hidden bg-[#03060c]">
+      <Starfield />
+      <div className="absolute inset-0">
+      <FireMap startGlobe hideAttribution holdCamera={isWorld} initialView={{ center: [-20, 12], zoom: 1.5 }}
+        onMap={(m) => { mapRef.current = m; frame(m, false); setMapReady(true); }}
+        points={shownPoints} density={dens.data} recurrence={rec.data} aoiGeom={aoiGeom} mode={mode} cluster={cluster} heat={heat}
         showModis={showM} showViirs={showV} showBoundaries={bounds} dRange={dRange} fitTo={fit} drawMode={draw}
         onCountryClick={(c) => setFilters({ aoi: { kind: "country", country: c } })}
         onDraw={(g) => { setDraw("none"); setFilters({ aoi: g.kind === "bbox" ? { kind: "bbox", bbox: g.bbox } : { kind: "polygon", geometry: g.geometry, name: "Drawn polygon" } }); }} />
+      </div>
 
-      <div className="absolute left-3 top-3 w-[262px] space-y-3 rounded-xl border border-ink-600 bg-ink-900/92 p-3 shadow-2xl backdrop-blur">
+      <DataInfo />
+      <FloatingStory open={storyOpen} onToggle={setStoryOpen} globe={globe} />
+      <LoadingText globe={globe} visible={loadingVisible} steps={steps} percent={percent} error={loadErr}
+        onRetry={() => { pts.reload(); summary.reload(); }} />
+
+      <>
+      {/* headline numbers for the current view */}
+      <div className="pointer-events-none absolute left-1/2 top-3 z-10 hidden -translate-x-1/2 gap-2 lg:flex">
+        {[
+          { l: "Fire detections", v: summary.data?.kpi?.total_detections, c: "#ffd166" },
+          { l: "Harmonised activity", v: summary.data?.kpi?.harmonized_activity, c: "#ff7a3d", u: "cell-days" },
+          { l: "Hottest fire", v: summary.data?.kpi?.frp_max, c: "#ff4d4f", u: "MW" },
+        ].map((k, i) => (
+          <div key={k.l} className="panel-in glass rounded-xl px-4 py-2 text-center" style={{ animationDelay: `${0.15 + i * 0.12}s` }}>
+            <div className="text-[10px] uppercase tracking-[0.18em] text-slate-400">{k.l}</div>
+            <div className="font-mono text-lg font-semibold" style={{ color: k.c }}>
+              <CountUp value={k.v} />{k.u && <span className="ml-1 text-[10px] font-normal text-slate-500">{k.u}</span>}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="panel-in absolute left-3 top-3 z-10 w-[262px] space-y-3 rounded-xl border border-ink-600 bg-ink-900/92 p-3 shadow-2xl backdrop-blur">
         <div>
           <div className="label mb-1.5 flex items-center gap-1"><Layers size={11} /> View</div>
           <div className="grid grid-cols-2 gap-1">
@@ -121,50 +283,23 @@ export default function MapPage() {
         <div>
           <div className="label mb-1.5">Area of interest</div>
           <div className="flex gap-1">
-            <button className={clsx("btn flex-1 justify-center", draw === "bbox" && "!border-sky-400 !text-sky-300")} onClick={() => setDraw(draw === "bbox" ? "none" : "bbox")}><Square size={12} /> Box</button>
-            <button className={clsx("btn flex-1 justify-center", draw === "polygon" && "!border-sky-400 !text-sky-300")} onClick={() => setDraw(draw === "polygon" ? "none" : "polygon")}><Spline size={12} /> Polygon</button>
-            {filters.aoi.kind !== "world" && <button className="btn" title="Clear AOI" onClick={() => setFilters({ aoi: { kind: "world" } })}><X size={12} /></button>}
+            <button className={clsx("btn flex-1 justify-center", draw === "bbox" && "!border-sky-400 !text-sky-300")} onClick={() => setDraw(draw === "bbox" ? "none" : "bbox")}><Square size={12} /> {draw === "bbox" ? "Cancel" : "Select area"}</button>
+            {filters.aoi.kind !== "world" && <button className="btn" title="Back to the whole world" onClick={() => setFilters({ aoi: { kind: "world" } })}><X size={12} /></button>}
           </div>
+          <div className="mt-1.5 flex"><AreaSearch className="w-full !text-[12px]" /></div>
           <div className="mt-1.5 text-[11px] text-slate-400">
-            {draw === "bbox" ? "Click two opposite corners." : draw === "polygon" ? "Click vertices; double-click or Enter to finish, Esc to reset." : <>Current: <b className="text-slate-200">{aoiLabel(filters.aoi)}</b> · Shift-click a country to select it.</>}
+            {draw === "bbox" ? "Click two opposite corners on the map." : <>Current: <b className="text-slate-200">{aoiLabel(filters.aoi)}</b></>}
           </div>
         </div>
       </div>
 
-      {!showTime ? (
-        <div className="absolute bottom-8 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full border border-ink-600 bg-ink-900/92 py-1.5 pl-3.5 pr-1.5 text-[11.5px] text-slate-300 shadow-2xl backdrop-blur">
-          <span className="font-mono text-slate-200">{timeLabel}</span>
-          <span className="text-slate-500">·</span>
-          {status}
-          {selectedDate && <button className="btn !rounded-full !py-1" onClick={() => setSelectedDate(null)}><X size={12} /> Whole period</button>}
-          <button className="btn !rounded-full !py-1" onClick={() => setShowTime(true)}><Clock size={12} /> Time playback</button>
-        </div>
-      ) : (
-        <div className="absolute bottom-8 left-1/2 w-[min(760px,calc(100%-24px))] -translate-x-1/2 rounded-xl border border-ink-600 bg-ink-900/92 p-3 shadow-2xl backdrop-blur">
-          {hist && (
-            <div className="mb-1.5 flex h-10 items-end gap-px" title="Detections per step - click a bar to jump there">
-              {hist.counts.map((c, i) => (
-                <div key={i} onClick={() => { setSelectedDate(null); setPlaying(false); setStep(i); }}
-                  className="flex-1 cursor-pointer rounded-t-sm transition-colors hover:bg-harm"
-                  style={{ height: `${Math.max(4, (c / hist.max) * 100)}%`, background: step === i ? "#e0552f" : step !== null && i < step ? "#7c3a24" : "#3d4a63" }}
-                  title={`${addDays(filters.start, i * win)}: ${fmt(c)} detections${pts.data?.sampled ? " (sample)" : ""}`} />
-              ))}
-            </div>
-          )}
-          <div className="flex items-center gap-3">
-            <button className="btn !p-2" title={playing ? "Pause" : "Play"} onClick={() => { if (selectedDate) setSelectedDate(null); setPlaying((p) => !p); if (step === null) setStep(0); }}>{playing ? <Pause size={14} /> : <Play size={14} />}</button>
-            <input type="range" min={0} max={nSteps - 1} value={step ?? 0} onChange={(e) => { setSelectedDate(null); setStep(Number(e.target.value)); }} className="flex-1 accent-[#e0552f]" />
-            <div className="seg">{(["day", "week", "month", "year"] as const).map((g) => <button key={g} className={clsx(gran === g && "on")} onClick={() => setGran(g)}>{g}</button>)}</div>
-            <button className="btn" title="Close playback and show the whole period" onClick={() => { setStep(null); setPlaying(false); setSelectedDate(null); setShowTime(false); }}><X size={13} /></button>
-          </div>
-          <div className="mt-1.5 flex justify-between text-[11px] text-slate-400">
-            <span className="font-mono text-slate-200">{timeLabel}</span>
-            <span>{status}</span>
-          </div>
-        </div>
+      {selectedDate && (
+        <button className="float-text absolute bottom-8 left-1/2 z-10 -translate-x-1/2 text-[12px] text-slate-200 hover:text-white" onClick={() => setSelectedDate(null)}>
+          Showing {selectedDate} only · <span className="text-orange-300 underline underline-offset-2">show whole period</span>
+        </button>
       )}
 
-      <div className="absolute right-12 top-3 rounded-lg border border-ink-600 bg-ink-900/90 px-3 py-2 text-[11px] text-slate-300">
+      <div className="panel-in absolute right-12 top-3 z-10 rounded-lg border border-ink-600 bg-ink-900/90 px-3 py-2 text-[11px] text-slate-300">
         {mode === "intensity" || mode === "density" || mode === "harmonized" ? (
           <div>
             <div className="mb-1 text-slate-400">{mode === "intensity" ? "FRP (MW)" : mode === "density" ? "Share of years with fire" : "Harmonised cell-days (relative)"}</div>
@@ -178,7 +313,7 @@ export default function MapPage() {
           </div>
         )}
       </div>
-      {pts.error && <div className="absolute right-3 top-20 max-w-sm rounded bg-red-950/90 p-2 text-xs text-red-200">{pts.error}</div>}
+            </>
     </div>
   );
 }

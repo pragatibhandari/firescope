@@ -6,12 +6,12 @@ import {
 } from "lucide-react";
 import { useStore } from "../lib/store";
 import { apiGet } from "../lib/api";
-import { aoiLabel } from "../lib/format";
+import { aoiLabel, parseLatLon } from "../lib/format";
 import { useUploadQueue } from "../lib/uploadQueue";
 
 const NAV = [
-  { to: "/", label: "Overview", icon: LayoutDashboard },
-  { to: "/map", label: "Global Fire Map", icon: Map },
+  { to: "/", label: "Global Fire Map", icon: Map },
+  { to: "/overview", label: "Dashboard", icon: LayoutDashboard },
   { to: "/calendar", label: "Burning Calendar", icon: CalendarDays },
   { to: "/lab", label: "Harmonization Lab", icon: FlaskConical },
   { to: "/history", label: "Historical Analysis", icon: History },
@@ -29,7 +29,7 @@ export function Sidebar() {
   const pending = queue.filter((q) => q.state === "waiting" || q.state === "uploading").length;
   const doneN = queue.filter((q) => q.state === "done" || q.state === "failed").length;
   return (
-    <aside className="flex w-[218px] shrink-0 flex-col border-r border-ink-700 bg-ink-900">
+    <aside className="flex h-full w-[218px] shrink-0 flex-col border-r border-ink-700 bg-ink-900">
       <div className="flex items-center gap-2.5 px-4 pb-4 pt-5">
         <div className="relative flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-harm to-[#7a1d0c] shadow-lg shadow-harm/20">
           <Satellite size={18} className="text-white" />
@@ -60,6 +60,11 @@ export function Sidebar() {
           val={!firms ? "…" : !firms.configured ? "not set" : firms.reachable === false ? "unreachable" : "configured"} />
         <Row ok={status?.live_freshness_hours != null && status.live_freshness_hours < 48} warn label="Live data"
           val={status?.live_last_observation ? `to ${String(status.live_last_observation).slice(0, 10)}` : "none synced"} />
+        {status?.autosync?.enabled && (
+          <div className="pl-3.5 text-[10px] leading-snug text-slate-500" title={`Newest MODIS + VIIRS detections are fetched from NASA FIRMS automatically.${status.autosync.last_run ? " Last run " + String(status.autosync.last_run).slice(0, 16).replace("T", " ") + " UTC" + (status.autosync.last_status ? " (" + status.autosync.last_status + ")" : "") : ""}`}>
+            Auto-updates from NASA every {Number(status.autosync.every_hours)} h
+          </div>
+        )}
       </div>
       <div className="px-4 pb-3 text-[10px] leading-snug text-slate-600">Data: NASA FIRMS · MODIS C6.1 & VIIRS 375 m</div>
     </aside>
@@ -83,9 +88,6 @@ const PRESETS: { l: string; days?: number; all?: boolean }[] = [
 
 export function FilterBar() {
   const { filters, setFilters, params, setParams, status } = useStore();
-  const [countries, setCountries] = useState<{ name: string }[]>([]);
-  const [cq, setCq] = useState("");
-  useEffect(() => { apiGet("/api/regions").then(setCountries).catch(() => {}); }, []);
   const cov = status?.coverage?.[filters.dataset] || [];
   const lastDate = cov.length ? cov.map((c: any) => c.last_date).sort().slice(-1)[0]?.slice(0, 10) : null;
   const firstDate = cov.length ? cov.map((c: any) => c.first_date).sort()[0]?.slice(0, 10) : null;
@@ -102,12 +104,6 @@ export function FilterBar() {
   };
   return (
     <div className="flex flex-wrap items-end gap-x-4 gap-y-2 border-b border-ink-700 bg-ink-900/80 px-5 py-2.5 backdrop-blur">
-      <Field label="Dataset">
-        <div className="seg">
-          <button className={clsx(filters.dataset === "live" && "on")} onClick={() => setFilters({ dataset: "live" })}>Live FIRMS</button>
-          {status?.demo !== "absent" && <button className={clsx(filters.dataset === "demo" && "on")} onClick={() => setFilters({ dataset: "demo" })}>Demo</button>}
-        </div>
-      </Field>
       <Field label="Date range (UTC)">
         <div className="flex items-center gap-1">
           <input type="date" className="input w-[122px]" value={filters.start} onChange={(e) => e.target.value && setFilters({ start: e.target.value })} />
@@ -127,9 +123,7 @@ export function FilterBar() {
           <span className="chip max-w-[180px] truncate border-harm/40 text-slate-100" title={aoiLabel(filters.aoi)}>{aoiLabel(filters.aoi)}
             {filters.aoi.kind !== "world" && <X size={12} className="cursor-pointer text-slate-400 hover:text-white" onClick={() => setFilters({ aoi: { kind: "world" } })} />}
           </span>
-          <input list="countries" className="input w-[130px]" placeholder="Country…" value={cq}
-            onChange={(e) => { setCq(e.target.value); if (countries.some((c) => c.name === e.target.value)) { setFilters({ aoi: { kind: "country", country: e.target.value } }); setCq(""); } }} />
-          <datalist id="countries">{countries.map((c) => <option key={c.name} value={c.name} />)}</datalist>
+          <AreaSearch className="w-[170px]" />
         </div>
       </Field>
       <Field label="Product">
@@ -151,26 +145,44 @@ export function FilterBar() {
   );
 }
 
+let COUNTRY_LIST: { name: string }[] = [];
+/** Search box for the area of interest: a country name, "lat, lon" (1° box) or "lat1, lon1, lat2, lon2". */
+export function AreaSearch({ className }: { className?: string }) {
+  const { setFilters } = useStore();
+  const [countries, setCountries] = useState<{ name: string }[]>(COUNTRY_LIST);
+  const [q, setQ] = useState("");
+  const [bad, setBad] = useState(false);
+  useEffect(() => { if (!COUNTRY_LIST.length) apiGet("/api/regions").then((r) => { COUNTRY_LIST = r; setCountries(r); }).catch(() => {}); }, []);
+  const submit = (v: string) => {
+    const c = countries.find((x) => x.name.toLowerCase() === v.trim().toLowerCase());
+    if (c) { setFilters({ aoi: { kind: "country", country: c.name } }); setQ(""); return; }
+    const box = parseLatLon(v);
+    if (box) { setFilters({ aoi: box }); setQ(""); return; }
+    setBad(true);
+  };
+  return (
+    <>
+      <input list="area-countries" className={clsx("input", bad && "!border-red-500/60", className)} placeholder="Country or lat, lon" value={q}
+        title="Type a country, or coordinates: 'lat, lon' (selects a 1° box around the point) or 'lat1, lon1, lat2, lon2'. Press Enter."
+        onChange={(e) => { setBad(false); setQ(e.target.value); if (countries.some((c) => c.name === e.target.value)) submit(e.target.value); }}
+        onKeyDown={(e) => { if (e.key === "Enter" && q.trim()) submit(q); }} />
+      <datalist id="area-countries">{countries.map((c) => <option key={c.name} value={c.name} />)}</datalist>
+    </>
+  );
+}
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return <div className="flex flex-col gap-1"><span className="label">{label}</span>{children}</div>;
 }
 
-export function DemoBanner() {
-  const { filters, status, setFilters } = useStore();
+/** Shown only when the server has no satellite data at all (no simulated fallback). */
+export function DataBanner() {
+  const { status } = useStore();
   const hasLive = (status?.datasets || []).some((d: any) => d.dataset === "live");
-  if (filters.dataset === "live" && hasLive) return null;
-  if (filters.dataset === "live" && !hasLive)
-    return (
-      <div className="flex items-center gap-2 border-b border-amber-900/50 bg-amber-950/40 px-5 py-1.5 text-[12px] text-amber-200">
-        <Activity size={13} /> No live satellite data has been synced or uploaded yet. Go to <b>Data Sources</b> to sync from NASA FIRMS or upload FIRMS CSV/GeoJSON files,
-        or <button className="underline" onClick={() => setFilters({ dataset: "demo" })}>switch to the demo dataset</button>.
-      </div>
-    );
+  if (!status || status.error || hasLive) return null;
   return (
-    <div className="flex items-center gap-2 border-b border-fuchsia-900/50 bg-fuchsia-950/40 px-5 py-1.5 text-[12px] text-fuchsia-200">
-      <span className="rounded bg-fuchsia-500/20 px-1.5 py-px font-mono text-[10px] font-bold tracking-wider text-fuchsia-200">DEMO MODE</span>
-      Synthetic demonstration dataset — simulated fires observed by simulated MODIS/VIIRS sensors. Not real satellite observations.
-      {status?.demo === "building" && <span className="ml-2 animate-pulse text-fuchsia-300">Building demo dataset (≈30 s)…</span>}
+    <div className="flex items-center gap-2 border-b border-amber-900/50 bg-amber-950/40 px-5 py-1.5 text-[12px] text-amber-200">
+      <Activity size={13} /> No satellite data has been loaded on this server yet. Go to <b>Data Sources</b> to sync from NASA FIRMS or upload FIRMS CSV/GeoJSON files.
     </div>
   );
 }

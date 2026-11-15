@@ -5,7 +5,7 @@ import io
 import json
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import httpx
 import numpy as np
@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from shapely.geometry import mapping, shape
 
 from . import analytics, firms, store
-from .config import ADMIN_TOKEN, CORS_ORIGINS, DEMO_ENABLED, DEMO_SEED, MAX_MAP_POINTS, PLATFORM_START
+from .config import ADMIN_TOKEN, AUTOSYNC_HOURS, CORS_ORIGINS, MAX_MAP_POINTS, PLATFORM_START
 from .geo import AOI, countries_geojson_simplified, country_index
 from .harmonize import HarmonizationParams, run, sensitivity
 from .reports import LIMITATIONS, build_pdf
@@ -37,27 +37,54 @@ def require_admin(x_admin_token: str | None = Header(default=None)):
         raise HTTPException(401, "Admin password required for this action.")
 
 
-STATE = {"demo": "absent", "demo_rows": 0, "started": datetime.utcnow().isoformat() + "Z"}
+STATE = {"started": datetime.utcnow().isoformat() + "Z"}
+AUTOSYNC = {"enabled": False, "every_hours": AUTOSYNC_HOURS, "last_run": None, "last_status": None,
+            "last_rows": 0, "next_run": None, "job_id": None}
 
 
-def _build_demo():
-    from .demo import generate, to_canonical
-    STATE["demo"] = "building"
-    try:
-        df = to_canonical(generate(seed=DEMO_SEED))
-        STATE["demo_rows"] = store.insert(df)
-        STATE["demo"] = "ready"
-    except Exception as e:  # noqa
-        STATE["demo"] = f"failed: {e}"
+def _autosync_loop():
+    """Every AUTOSYNC_HOURS: fetch the newest MODIS + VIIRS near-real-time detections for the whole world.
+
+    Re-fetches the last 2 days each time (NRT files grow during the day); duplicates are skipped on insert,
+    so only new detections are added. Uses a handful of FIRMS API transactions per run.
+    """
+    time.sleep(90)  # let the server finish starting
+    while True:
+        try:
+            today = datetime.utcnow().date()
+            last = store.dataset_summary()
+            lasts = [str(d["last_date"])[:10] for d in last if d["dataset"] == "live" and str(d["last_date"]) not in ("NaT", "None")]
+            last_obs = date.fromisoformat(max(lasts)) if lasts else today - timedelta(days=2)
+            # catch up from the last stored day (at most 10 days back to protect the API quota)
+            start = max(min(last_obs, today - timedelta(days=1)) - timedelta(days=1), today - timedelta(days=10))
+            AUTOSYNC.update(last_run=datetime.utcnow().isoformat() + "Z", last_status="running")
+            jid = firms.start_area_sync([-180, -90, 180, 90], start, today, ["MODIS", "VIIRS"], chunk_days=1)  # whole world: one day per request
+            AUTOSYNC["job_id"] = jid
+            while firms.JOBS.get(jid, {}).get("status") in ("queued", "running") or str(firms.JOBS.get(jid, {}).get("status", "")).startswith("waiting"):
+                time.sleep(10)
+            j = firms.JOBS.get(jid, {})
+            AUTOSYNC.update(last_status=j.get("status"), last_rows=j.get("rows_added", 0))
+            if j.get("rows_added"):
+                with _hlock:
+                    _hcache.clear()
+        except Exception as e:  # noqa
+            AUTOSYNC.update(last_status=f"error: {e}")
+        nxt = datetime.utcnow() + timedelta(hours=AUTOSYNC_HOURS)
+        AUTOSYNC["next_run"] = nxt.isoformat() + "Z"
+        time.sleep(AUTOSYNC_HOURS * 3600)
 
 
 @app.on_event("startup")
 def _startup():
-    n = store.count("demo")
-    if n:
-        STATE.update(demo="ready", demo_rows=n)
-    elif DEMO_ENABLED:
-        threading.Thread(target=_build_demo, daemon=True).start()
+    # real satellite data only: drop any synthetic demo rows left from older versions (frees memory and disk)
+    try:
+        if store.count("demo"):
+            store.delete_dataset("demo")
+    except Exception:  # noqa
+        pass
+    if AUTOSYNC_HOURS > 0 and firms.key_configured():
+        AUTOSYNC["enabled"] = True
+        threading.Thread(target=_autosync_loop, daemon=True).start()
 
 
 def _json(obj):
@@ -76,7 +103,10 @@ def _json(obj):
             return bool(o)
         return str(o)
     txt = json.dumps(obj, default=conv)
-    return JSONResponse(content=json.loads(txt, parse_constant=lambda c: None))
+    clean = json.loads(txt, parse_constant=lambda c: None)
+    body = json.dumps(clean, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    # X-Content-Bytes = uncompressed size, so the browser can show real download progress even when gzipped
+    return Response(content=body, media_type="application/json", headers={"X-Content-Bytes": str(len(body))})
 
 
 # --------------------------------------------------------------------------- harmonisation cache
@@ -151,11 +181,12 @@ def status():
     if last and last != "NaT":
         fresh_h = round((datetime.utcnow() - pd.Timestamp(last).to_pydatetime()).total_seconds() / 3600, 1)
     return _json({
-        "server_time": datetime.utcnow().isoformat() + "Z", "demo": STATE["demo"], "demo_rows": STATE["demo_rows"],
-        "firms": firms.mapkey_status(), "datasets": ds, "default_dataset": "live" if live else "demo",
+        "server_time": datetime.utcnow().isoformat() + "Z",
+        "firms": firms.mapkey_status(), "datasets": ds, "default_dataset": "live",
         "live_last_observation": last, "live_freshness_hours": fresh_h, "sync_history": store.sync_history(),
+        "autosync": AUTOSYNC,
         "coverage": {d: store.coverage(d).assign(first_date=lambda x: x.first_date.astype(str), last_date=lambda x: x.last_date.astype(str)).to_dict("records")
-                     for d in ("demo", "live")},
+                     for d in ("live",)},
         "platform_start": PLATFORM_START, "sources": firms.SOURCES, "admin_required": bool(ADMIN_TOKEN),
     })
 
@@ -360,8 +391,6 @@ def export_csv(body: dict = Body(...)):
         name = "firescope_hotspots.csv"
     buf = io.StringIO()
     buf.write(f"# FireScope export | dataset={f.dataset} | aoi={AOI(f.aoi).name} | {f.start}..{f.end} | generated {datetime.utcnow():%Y-%m-%dT%H:%MZ}\n")
-    if f.dataset == "demo":
-        buf.write("# WARNING: SYNTHETIC DEMONSTRATION DATA - NOT SATELLITE OBSERVATIONS\n")
     buf.write(f"# filters={f.key()} | params={json.dumps(hr.params, default=str)}\n")
     out.to_csv(buf, index=False)
     return Response(buf.getvalue(), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={name}"})
@@ -378,7 +407,7 @@ def export_geojson(body: dict = Body(...)):
         feats.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [lon, lat]}, "properties": props})
     fc = {"type": "FeatureCollection", "name": "firescope_hotspots",
           "metadata": {"dataset": f.dataset, "aoi": AOI(f.aoi).name, "start": str(f.start), "end": str(f.end),
-                       "synthetic": f.dataset == "demo", "params": hr.params}, "features": feats}
+                       "params": hr.params}, "features": feats}
     return Response(json.dumps(fc, default=str), media_type="application/geo+json",
                     headers={"Content-Disposition": "attachment; filename=firescope_hotspots.geojson"})
 
@@ -468,7 +497,7 @@ def firms_status():
 
 @app.delete("/api/dataset/{name}", dependencies=[Depends(require_admin)])
 def delete_dataset(name: str):
-    if name not in ("live", "demo"):
+    if name != "live":
         raise HTTPException(400, "unknown dataset")
     store.delete_dataset(name)
     with _hlock:
