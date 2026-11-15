@@ -1,5 +1,5 @@
 import React from "react";
-import { HashRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { HashRouter, Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import clsx from "clsx";
 import { Menu, Satellite, SlidersHorizontal } from "lucide-react";
 import { StoreProvider, useStore } from "./lib/store";
@@ -49,10 +49,10 @@ function Shell() {
         {/* phone: compact top bar */}
         <div className="flex items-center gap-2 border-b border-ink-700 bg-ink-900 px-3 py-2 md:hidden">
           <button className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-200 hover:bg-ink-800" onClick={() => setMenu(true)} aria-label="Open menu"><Menu size={20} /></button>
-          <div className="flex items-center gap-2">
+          <Link to="/" title="FireScope home: Global Fire Map" className="flex items-center gap-2">
             <div className="flex h-7 w-7 items-center justify-center rounded-md bg-gradient-to-br from-harm to-[#7a1d0c]"><Satellite size={14} className="text-white" /></div>
             <span className="text-[15px] font-bold tracking-tight text-white">FireScope</span>
-          </div>
+          </Link>
           <button className={clsx("ml-auto flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-[12px]", filtersOpen ? "bg-ink-700 text-white" : "text-slate-300 hover:bg-ink-800")} onClick={() => setFiltersOpen((o) => !o)} aria-label="Filters">
             <SlidersHorizontal size={16} /> Filters
           </button>

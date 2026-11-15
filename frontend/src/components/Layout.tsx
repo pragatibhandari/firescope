@@ -30,7 +30,7 @@ export function Sidebar() {
   const doneN = queue.filter((q) => q.state === "done" || q.state === "failed").length;
   return (
     <aside className="flex h-full w-[218px] shrink-0 flex-col border-r border-ink-700 bg-ink-900">
-      <div className="flex items-center gap-2.5 px-4 pb-4 pt-5">
+      <NavLink to="/" title="FireScope home: Global Fire Map" className="flex items-center gap-2.5 rounded-lg px-4 pb-4 pt-5 transition hover:opacity-90">
         <div className="relative flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-harm to-[#7a1d0c] shadow-lg shadow-harm/20">
           <Satellite size={18} className="text-white" />
         </div>
@@ -38,7 +38,7 @@ export function Sidebar() {
           <div className="text-[15px] font-bold tracking-tight text-white">FireScope</div>
           <div className="text-[10px] leading-tight text-slate-500">Burning Activity Intelligence</div>
         </div>
-      </div>
+      </NavLink>
       <nav className="flex-1 space-y-0.5 px-2">
         {NAV.map(({ to, label, icon: I }) => (
           <NavLink key={to} to={to} end={to === "/"} className={({ isActive }) => clsx(

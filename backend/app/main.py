@@ -119,6 +119,8 @@ _hlock = threading.Lock()
 # Finished responses for identical requests (same filters + parameters) are served from memory.
 # Cleared whenever the data changes (upload, sync, delete), so results are never stale.
 _rcache: dict[str, tuple[bytes, dict]] = {}
+_klocks: dict[str, threading.Lock] = {}
+_klocks_guard = threading.Lock()
 
 
 def _num(o):
@@ -151,11 +153,21 @@ def cached(fn):
         hit = _rcache.get(k)
         if hit is not None:
             return Response(content=hit[0], media_type="application/json", headers=hit[1])
-        r = fn(body)
-        if getattr(r, "status_code", 200) == 200 and hasattr(r, "body"):
-            if len(_rcache) >= 60:
-                _rcache.pop(next(iter(_rcache)))
-            _rcache[k] = (bytes(r.body), {"X-Content-Bytes": str(len(r.body))})
+        # single-flight: if the same request is already being computed (e.g. by the warm-up), wait for it
+        with _klocks_guard:
+            lk = _klocks.setdefault(k, threading.Lock())
+        with lk:
+            hit = _rcache.get(k)
+            if hit is not None:
+                return Response(content=hit[0], media_type="application/json", headers=hit[1])
+            r = fn(body)
+            if getattr(r, "status_code", 200) == 200 and hasattr(r, "body"):
+                if len(_rcache) >= 60:
+                    _rcache.pop(next(iter(_rcache)))
+                _rcache[k] = (bytes(r.body), {"X-Content-Bytes": str(len(r.body))})
+        with _klocks_guard:
+            if len(_klocks) > 200:
+                _klocks.clear()
         return r
     return wrapper
 
