@@ -117,6 +117,28 @@ function englishLabels(style: any): any {
     if (!JSON.stringify(l.layout["text-field"]).includes("name")) continue; // keep road numbers etc.
     l.layout["text-field"] = ["coalesce", ["get", "name_en"], ["get", "name:en"], ["get", "name:latin"], ["get", "name"]];
     l.layout["text-transform"] = "none";
+    // readable on any background: light text with a dark outline, sized by zoom (small at world view, larger when zoomed in)
+    const country = l.id.startsWith("place_country");
+    const big = country || l.id === "place_city_large" || l.id === "place_state";
+    l.layout["text-size"] = country
+      ? ["interpolate", ["linear"], ["zoom"], 1, 9, 3, 11, 5, 13, 8, 15]
+      : big
+        ? ["interpolate", ["linear"], ["zoom"], 2, 9, 5, 11, 8, 13, 12, 15]
+        : ["interpolate", ["linear"], ["zoom"], 4, 9, 8, 11, 12, 13, 16, 14];
+    l.layout["text-letter-spacing"] = country ? 0.04 : 0.02;
+    l.layout["text-max-width"] = 6;
+    // screen-facing labels stay crisp and steady while the globe turns (surface-aligned text shimmers);
+    // compact, centred labels keep the part that can overhang the rim small
+    l.layout["text-pitch-alignment"] = "viewport";
+    l.layout["text-rotation-alignment"] = "viewport";
+    l.layout["text-anchor"] = "center";
+    l.layout["text-padding"] = 3;
+    l.paint = { ...(l.paint || {}),
+      "text-color": country ? "#f1f5f9" : "#e2e8f0",
+      "text-halo-color": "rgba(3,10,25,0.9)",
+      "text-halo-width": 1.4,
+      "text-halo-blur": 0.4,
+      "text-opacity": ["interpolate", ["linear"], ["zoom"], 1, 0.85, 4, 0.95] };
   }
   // declutter the world view: smaller places only appear as you zoom in
   const MINZOOM: Record<string, number> = { place_other: 9, place_suburb: 10, place_village: 9, place_town: 7, place_city: 5.5, place_city_large: 3.5, place_state: 4.5 };

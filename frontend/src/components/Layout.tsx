@@ -103,9 +103,9 @@ export function FilterBar() {
     if (next.length) setFilters({ sensors: next });
   };
   return (
-    <div className="flex flex-wrap items-end gap-x-4 gap-y-2 border-b border-ink-700 bg-ink-900/80 px-5 py-2.5 backdrop-blur">
+    <div className="flex flex-wrap items-end gap-x-4 gap-y-2 border-b border-ink-700 bg-ink-900/80 px-3 py-2.5 backdrop-blur md:px-5">
       <Field label="Date range (UTC)">
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           <input type="date" className="input w-[122px]" value={filters.start} onChange={(e) => e.target.value && setFilters({ start: e.target.value })} />
           <span className="text-slate-500">→</span>
           <input type="date" className="input w-[122px]" value={filters.end} onChange={(e) => e.target.value && setFilters({ end: e.target.value })} />

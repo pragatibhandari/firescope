@@ -38,24 +38,25 @@ export function FloatingStory({ open, onToggle, globe, hidden }: { open: boolean
     const t = setInterval(() => go(1), 9000);
     return () => clearInterval(t);
   }, [open, tick]);
-  if (!globe || globe.W <= 900 || hidden) return null;
+  if (!globe || hidden) return null;
   const s = STORIES[i];
-  const width = Math.max(270, Math.min(320, globe.W - (globe.cx + globe.r + GAP) - 24));
-  const left = Math.min(globe.cx + globe.r + GAP, globe.W - width - 24);
+  const phone = globe.W <= 900;
+  const width = phone ? globe.W - 32 : Math.max(270, Math.min(320, globe.W - (globe.cx + globe.r + GAP) - 24));
+  const left = phone ? 16 : Math.min(globe.cx + globe.r + GAP, globe.W - width - 24);
   const btn = "pointer-events-auto flex h-7 w-7 items-center justify-center rounded-full text-slate-300 transition hover:bg-white/10 hover:text-white";
   return (
     <>
       {/* collapsed: arrow tab on the right edge */}
-      <button onClick={() => onToggle(true)} title="Show wildfire facts"
+      <button onClick={() => onToggle(true)} title="Show fire facts"
         className={clsx("float-text absolute right-0 top-1/2 z-10 flex -translate-y-1/2 items-center gap-1 py-3 pl-2 pr-1.5 text-slate-300 transition-all duration-500 hover:text-white",
           open ? "pointer-events-none translate-x-6 opacity-0" : "translate-x-0 opacity-100")}>
         <ChevronLeft size={18} />
-        <span className="text-[11px] tracking-[0.18em] [writing-mode:vertical-rl] rotate-180 uppercase">Wildfire facts</span>
+        <span className="text-[11px] tracking-[0.18em] [writing-mode:vertical-rl] rotate-180 uppercase">Fire facts</span>
       </button>
 
       {/* open: floating fact with controls */}
       <div className={clsx("float-text pointer-events-none absolute z-10 transition-all duration-700 ease-out", open ? "translate-x-0 opacity-100" : "translate-x-10 opacity-0")}
-        style={{ left, top: globe.cy - globe.r * 0.42, width }}>
+        style={phone ? { left, bottom: 120, width } : { left, top: globe.cy - globe.r * 0.42, width }}>
         <div className={clsx("text-[clamp(22px,2vw,30px)] font-semibold leading-tight tracking-tight text-amber-200 transition-all duration-[700ms] ease-out", shown ? "translate-y-0 opacity-100 blur-0" : "-translate-y-2 opacity-0 blur-[3px]")}>{s.big}</div>
         <p className={clsx("mt-2.5 text-[clamp(14px,1.1vw,16px)] font-light leading-relaxed text-slate-100 transition-all duration-[700ms] ease-out", shown ? "translate-y-0 opacity-100" : "translate-y-2 opacity-0")}
           style={{ transitionDelay: shown ? "150ms" : "0ms" }}>{s.text}</p>
@@ -83,44 +84,20 @@ export function LoadingText({ visible, steps, percent, error, onRetry, globe }: 
   visible: boolean; steps: LoadStep[]; percent: number; error: string | null; onRetry: () => void; globe: Globe;
 }) {
   // mirror of the story: to the left of the globe with the same gap, in its lower half (below the View panel)
-  const wide = !!globe && globe.W > 900;
-  const right = wide ? globe!.cx - globe!.r - GAP : 0;
-  const width = wide ? Math.max(180, Math.min(300, right - 24)) : 0;
-  const pos: React.CSSProperties = wide
-    ? { left: right - width, width, top: Math.max(410, globe!.cy + globe!.r * 0.12) }
-    : { left: 16, right: 16, bottom: 24 };
-  const cur = steps.findIndex((s) => !s.done);
-  const ci = cur === -1 ? steps.length - 1 : cur;
-  const shown = steps.slice(Math.max(0, ci - 2), ci + 1);
+  // bottom-left corner, just above the map scale bar
+  const pos: React.CSSProperties = { left: 16, bottom: 44, width: Math.min(260, (globe?.W ?? 400) - 32) };
+  // simple, quiet status: "Loading data…" and a real progress bar (no step list, no percentage)
   return (
     <div className={clsx("float-text absolute z-10 transition-opacity duration-700", visible ? "opacity-100" : "pointer-events-none opacity-0")} style={pos}>
-      <ul className="space-y-1.5">
-        {shown.map((s) => {
-          const active = !s.done && !error;
-          return (
-            <li key={s.label} className={clsx("flex items-start gap-2.5 transition-all duration-500", s.done ? "text-slate-500" : "text-slate-100")}>
-              <span className="mt-[5px] flex h-2 w-2 shrink-0 items-center justify-center">
-                {s.done ? <span className="h-1.5 w-1.5 rounded-full bg-emerald-400/80" />
-                  : error ? <span className="h-2 w-2 rounded-full bg-red-400" />
-                  : <span className="relative flex h-2 w-2"><span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-400 opacity-60" /><span className="relative inline-flex h-2 w-2 rounded-full bg-orange-400" /></span>}
-              </span>
-              <span className="min-w-0">
-                <span className={clsx(active ? "text-[13.5px] font-normal" : "text-[12px] font-light")}>{s.label}{active && <span className="loading-dots inline-block w-4 text-left" />}</span>
-                {s.detail && <span className={clsx("block font-mono text-[10.5px]", active ? "text-slate-400" : "text-slate-600")}>{s.detail}</span>}
-              </span>
-            </li>
-          );
-        })}
-      </ul>
       {error ? (
-        <div className="mt-2.5 pl-[18px] text-[12.5px] text-red-200">{error} <button className="ml-1 text-orange-300 underline decoration-orange-300/40 underline-offset-2 hover:text-orange-200" onClick={onRetry}>Retry</button></div>
+        <div className="text-[13px] text-red-200">{error} <button className="ml-1 text-orange-300 underline decoration-orange-300/40 underline-offset-2 hover:text-orange-200" onClick={onRetry}>Retry</button></div>
       ) : (
-        <div className="mt-3 flex items-center gap-3 pl-[18px]">
-          <div className="h-[2px] flex-1 overflow-hidden rounded-full bg-white/10">
-            <div className="h-full rounded-full bg-gradient-to-r from-amber-300 via-orange-500 to-red-500 shadow-[0_0_8px_rgba(255,120,40,0.8)]" style={{ width: `${Math.max(2, percent)}%`, transition: "width 250ms linear" }} />
+        <>
+          <div className="text-[13.5px] font-light tracking-wide text-slate-100">Loading data<span className="loading-dots inline-block w-4 text-left" /></div>
+          <div className="mt-2 h-[2px] overflow-hidden rounded-full bg-white/10">
+            <div className="h-full rounded-full bg-gradient-to-r from-sky-300 via-blue-500 to-blue-600 shadow-[0_0_8px_rgba(59,130,246,0.85)]" style={{ width: `${Math.max(3, percent)}%`, transition: "width 250ms linear" }} />
           </div>
-          <span className="w-9 text-right font-mono text-[11px] text-slate-400">{Math.floor(percent)}%</span>
-        </div>
+        </>
       )}
     </div>
   );

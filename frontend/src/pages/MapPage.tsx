@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { Map as MLMap } from "maplibre-gl";
-import { Layers, Square, X } from "lucide-react";
+import { ChevronUp, Globe2, Layers, Map as MapIcon, Square, X } from "lucide-react";
 import clsx from "clsx";
 import FireMap, { DrawMode, MapMode, setEarthTheme } from "../components/FireMap";
 import { CountUp, Starfield } from "../components/IntroOverlay";
@@ -61,7 +61,7 @@ export default function MapPage() {
   const [mapReady, setMapReady] = useState(false);
   const [dl, setDl] = useState<Progress | null>(null);
   const firstLoad = useRef(!STORY_SHOWN);
-  const [storyOpen, setStoryOpen] = useState(!STORY_SHOWN); // open during the first load, then tucked away (arrow tab)
+  const [storyOpen, setStoryOpen] = useState(false); // fire facts start tucked away in the side tab
   const mapRef = useRef<MLMap | null>(null);
   const userMoved = useRef(false); // user zoomed/panned away from the framed globe
   const baseZoom = useRef(1.5);
@@ -72,6 +72,9 @@ export default function MapPage() {
   const [cluster, setCluster] = useState(false);
   const [bounds, setBounds] = useState(true);
   const [draw, setDraw] = useState<DrawMode>("none");
+  const [proj, setProj] = useState<"globe" | "flat">("globe");
+  const fitRef = useRef<[number, number, number, number] | null>(null);
+  const [panelOpen, setPanelOpen] = useState(() => typeof window === "undefined" || window.innerWidth >= 768);
   const gate = !!status && !status.error;
   const isWorld = filters.aoi.kind === "world";
   // hotspots are parsed while they download and drawn on the globe in real time
@@ -118,22 +121,33 @@ export default function MapPage() {
     if (!mapReady) return;
     const m = mapRef.current!;
     const onMove = (e: any) => { if (e.originalEvent && (e.type === "zoomstart" || e.originalEvent.type === "wheel")) userMoved.current = true; };
-    const onResize = () => { if (isWorld && !userMoved.current) frame(m, false); };
+    const onResize = () => { if (isWorld && proj === "globe" && !userMoved.current) frame(m, false); };
     m.on("zoomstart", onMove); m.on("resize", onResize);
     return () => { m.off("zoomstart", onMove); m.off("resize", onResize); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapReady, isWorld]);
-  // back to the whole world -> re-frame the globe
+  }, [mapReady, isWorld, proj]);
+  // projection: globe for the whole world, flat map once an area is selected (users can switch with the icons)
+  useEffect(() => { setProj(isWorld ? "globe" : "flat"); }, [isWorld]);
   useEffect(() => {
-    if (!mapReady || !isWorld) return;
-    userMoved.current = false;
-    frame(mapRef.current!, true);
+    if (!mapReady) return;
+    const m = mapRef.current!;
+    try { m.setProjection({ type: proj === "globe" ? "globe" : "mercator" }); } catch { /* style not ready */ }
+    // back to the whole-world globe -> re-frame it (the flat map is fitted by FireMap)
+    if (proj === "globe" && isWorld) { userMoved.current = false; frame(m, true); }
+    // flat map: fit after the projection has changed (fitting under the globe gives the wrong zoom)
+    else if (proj === "flat") {
+      const wide = m.getContainer().clientWidth > 900;
+      requestAnimationFrame(() => {
+        if (isWorld) m.fitBounds([[-168, -56], [180, 76]], { padding: { top: 70, bottom: 40, left: wide ? 290 : 20, right: 20 }, duration: 800 });
+        else if (fitRef.current) { const [w, so, e, n] = fitRef.current; m.fitBounds([[w, so], [e, n]], { padding: { top: 60, bottom: 40, left: wide ? 290 : 40, right: 40 }, maxZoom: 9, duration: 800 }); }
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapReady, isWorld]);
+  }, [mapReady, proj, isWorld]);
 
   // slow rotation for the whole-world view; pauses while the user interacts or zooms in
   useEffect(() => {
-    if (!mapReady || reduceMotion || !isWorld || draw !== "none") return;
+    if (!mapReady || reduceMotion || !isWorld || proj !== "globe" || draw !== "none") return;
     const m = mapRef.current!;
     let raf = 0, last = performance.now(), holdUntil = 0;
     const hold = () => { holdUntil = performance.now() + 6000; };
@@ -143,46 +157,44 @@ export default function MapPage() {
       const dt = Math.min(0.1, (now - last) / 1000); last = now;
       if (fastSpin.current || now < holdUntil || m.isMoving() || m.getZoom() > baseZoom.current + 0.35) return;
       const c = m.getCenter();
-      m.jumpTo({ center: [(((c.lng + dt * 5) + 540) % 360) - 180, c.lat] }); // 5 degrees per second
+      m.jumpTo({ center: [(((c.lng + dt * 8) + 540) % 360) - 180, c.lat] }); // 8 degrees per second
     };
     raf = requestAnimationFrame(spin);
     return () => { cancelAnimationFrame(raf); m.off("mousedown", hold); m.off("touchstart", hold); m.off("wheel", hold); };
-  }, [mapReady, reduceMotion, isWorld, draw]);
+  }, [mapReady, reduceMotion, isWorld, proj, draw]);
 
-  // natural-colour Earth (blue oceans, green land, white ice), kept after the data has loaded
+  // natural-colour Earth (blue oceans, green land, white ice)
   useEffect(() => { if (mapReady) setEarthTheme(mapRef.current!, "color", 0); }, [mapReady]);
 
-  // real data arrived (first load): facts fade away, the globe makes one fast revolution and settles a little bigger
-  const pulsed = useRef<any>(null);
+  // opening: keep the globe hidden until its coloured map tiles are in (no bare green ball),
+  // then fade it in while it zooms and turns gently into place
+  const [revealed, setRevealed] = useState(false);
   useEffect(() => {
-    if (!mapReady || !pts.data || pulsed.current === pts.data) return;
-    pulsed.current = pts.data;
-    if (!firstLoad.current) return;
-    firstLoad.current = false;
-    STORY_SHOWN = true;
-    setTimeout(() => setStoryOpen(false), 300);
+    if (!mapReady || revealed) return;
     const m = mapRef.current!;
-    if (reduceMotion || !isWorld || userMoved.current) return;
-    const GROW = 0.14; // after the full turn, zoom in: the globe ends ~10% larger
-    const z0 = m.getZoom(), c0 = m.getCenter(), dur = 2600, t0 = performance.now();
-    const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
-    let raf = 0;
-    fastSpin.current = true;
-    const step = (now: number) => {
-      const k = Math.min(1, (now - t0) / dur), e = ease(k);
-      m.jumpTo({ center: [((c0.lng + 360 * e + 540) % 360) - 180, c0.lat], zoom: z0 });
-      if (k < 1) { raf = requestAnimationFrame(step); return; }
-      // one full revolution done: now zoom in a little and settle
-      m.easeTo({ zoom: baseZoom.current + GROW, duration: 1400, easing: (t) => 1 - Math.pow(1 - t, 3) });
-      setTimeout(() => {
-        boost.current = GROW; baseZoom.current += GROW; fastSpin.current = false;
-        setGlobe((g) => (g ? { ...g, r: g.r * Math.pow(2, GROW) } : g)); // keep the facts clear of the larger globe
-      }, 1450);
+    let done = false;
+    const t0 = performance.now();
+    const go = () => {
+      if (done) return;
+      done = true;
+      clearInterval(iv);
+      const z = baseZoom.current, c = m.getCenter();
+      if (reduceMotion || !isWorld) { setRevealed(true); return; }
+      fastSpin.current = true;
+      m.jumpTo({ zoom: z - 0.9, center: [c.lng - 50, c.lat] });
+      requestAnimationFrame(() => setRevealed(true));
+      m.easeTo({ zoom: z, center: [c.lng, c.lat], duration: 2600, easing: (t) => 1 - Math.pow(1 - t, 3) });
+      setTimeout(() => { fastSpin.current = false; }, 2700);
     };
-    const t = setTimeout(() => { raf = requestAnimationFrame(step); }, 500); // start as the facts fade out
-    return () => { clearTimeout(t); cancelAnimationFrame(raf); fastSpin.current = false; };
+    const iv = setInterval(() => {
+      let ready = false;
+      try { ready = m.isStyleLoaded() !== undefined && (m as any).areTilesLoaded?.() && performance.now() - t0 > 300; } catch { /* */ }
+      if (ready || performance.now() - t0 > 7000) go(); // never wait more than 7 s
+    }, 120);
+    return () => { done = true; clearInterval(iv); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapReady, pts.data]);
+  }, [mapReady]);
+
 
   // ---------------- loading steps (each ticks only when it has really happened) ----------------
   const [rendered, setRendered] = useState<any>(null); // the points object that the map has finished processing
@@ -226,13 +238,14 @@ export default function MapPage() {
     dRange = [d, d];
   }
   const fit = useMemo(() => aoiBbox(filters.aoi, countryIdx), [JSON.stringify(filters.aoi), countryIdx.length]);
+  fitRef.current = fit;
   const aoiGeom = useMemo(() => aoiGeometry(filters.aoi), [JSON.stringify(filters.aoi)]);
 
   return (
     <div className="relative h-full min-h-[560px] overflow-hidden bg-[#03060c]">
       <Starfield />
-      <div className="absolute inset-0">
-      <FireMap startGlobe hideAttribution holdCamera={isWorld} initialView={{ center: [-20, 12], zoom: 1.5 }}
+      <div className={clsx("absolute inset-0 transition-opacity duration-[1400ms] ease-out", revealed ? "opacity-100" : "opacity-0")}>
+      <FireMap startGlobe hideAttribution holdCamera={isWorld && proj === "globe"} initialView={{ center: [-20, 12], zoom: 1.5 }}
         onMap={(m) => { mapRef.current = m; frame(m, false); setMapReady(true); }}
         points={shownPoints} density={dens.data} recurrence={rec.data} aoiGeom={aoiGeom} mode={mode} cluster={cluster} heat={heat}
         showModis={showM} showViirs={showV} showBoundaries={bounds} dRange={dRange} fitTo={fit} drawMode={draw}
@@ -262,9 +275,16 @@ export default function MapPage() {
         ))}
       </div>
 
-      <div className="panel-in absolute left-3 top-3 z-10 w-[262px] space-y-3 rounded-xl border border-ink-600 bg-ink-900/92 p-3 shadow-2xl backdrop-blur">
+      {!panelOpen && (
+        <button onClick={() => setPanelOpen(true)} className="panel-in absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-lg border border-ink-600 bg-ink-900/92 px-3 py-2 text-[12px] text-slate-200 shadow-2xl backdrop-blur hover:text-white">
+          <Layers size={13} /> View & area
+        </button>
+      )}
+      <div className={clsx("panel-in absolute left-3 top-3 z-10 max-h-[calc(100%-24px)] w-[min(262px,calc(100%-24px))] space-y-3 overflow-y-auto rounded-xl border border-ink-600 bg-ink-900/92 p-3 shadow-2xl backdrop-blur", !panelOpen && "hidden")}>
         <div>
-          <div className="label mb-1.5 flex items-center gap-1"><Layers size={11} /> View</div>
+          <div className="label mb-1.5 flex items-center gap-1"><Layers size={11} /> View
+            <button className="ml-auto rounded p-0.5 text-slate-400 hover:bg-ink-800 hover:text-white" title="Fold this panel away" onClick={() => setPanelOpen(false)}><ChevronUp size={14} /></button>
+          </div>
           <div className="grid grid-cols-2 gap-1">
             {MODES.map((m) => (
               <button key={m.v} title={m.d} onClick={() => setMode(m.v)}
@@ -287,8 +307,16 @@ export default function MapPage() {
             {filters.aoi.kind !== "world" && <button className="btn" title="Back to the whole world" onClick={() => setFilters({ aoi: { kind: "world" } })}><X size={12} /></button>}
           </div>
           <div className="mt-1.5 flex"><AreaSearch className="w-full !text-[12px]" /></div>
-          <div className="mt-1.5 text-[11px] text-slate-400">
-            {draw === "bbox" ? "Click two opposite corners on the map." : <>Current: <b className="text-slate-200">{aoiLabel(filters.aoi)}</b></>}
+          <div className="mt-1.5 flex items-center gap-2 text-[11px] text-slate-400">
+            <span className="min-w-0 flex-1 truncate">{draw === "bbox" ? "Click two opposite corners on the map." : <>Current: <b className="text-slate-200">{aoiLabel(filters.aoi)}</b></>}</span>
+            <div className="flex shrink-0 overflow-hidden rounded-md border border-ink-600" role="group" aria-label="Map view">
+              {([["globe", Globe2, "3D globe"], ["flat", MapIcon, "Flat map"]] as const).map(([v, I, label]) => (
+                <button key={v} title={label} aria-label={label} aria-pressed={proj === v} onClick={() => setProj(v)}
+                  className={clsx("flex h-7 w-8 items-center justify-center transition", proj === v ? "bg-ink-700 text-white" : "text-slate-400 hover:bg-ink-800 hover:text-slate-200")}>
+                  <I size={15} />
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -299,7 +327,7 @@ export default function MapPage() {
         </button>
       )}
 
-      <div className="panel-in absolute right-12 top-3 z-10 rounded-lg border border-ink-600 bg-ink-900/90 px-3 py-2 text-[11px] text-slate-300">
+      <div className={clsx("panel-in absolute right-12 top-3 z-10 rounded-lg border border-ink-600 bg-ink-900/90 px-3 py-2 text-[11px] text-slate-300", panelOpen && "hidden sm:block")}>
         {mode === "intensity" || mode === "density" || mode === "harmonized" ? (
           <div>
             <div className="mb-1 text-slate-400">{mode === "intensity" ? "FRP (MW)" : mode === "density" ? "Share of years with fire" : "Harmonised cell-days (relative)"}</div>

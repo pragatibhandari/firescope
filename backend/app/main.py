@@ -1,6 +1,7 @@
 """FireScope API - FastAPI application."""
 from __future__ import annotations
 
+import functools
 import io
 import json
 import threading
@@ -65,8 +66,8 @@ def _autosync_loop():
             j = firms.JOBS.get(jid, {})
             AUTOSYNC.update(last_status=j.get("status"), last_rows=j.get("rows_added", 0))
             if j.get("rows_added"):
-                with _hlock:
-                    _hcache.clear()
+                _clear_caches()
+            _warm_default_view()
         except Exception as e:  # noqa
             AUTOSYNC.update(last_status=f"error: {e}")
         nxt = datetime.utcnow() + timedelta(hours=AUTOSYNC_HOURS)
@@ -82,6 +83,7 @@ def _startup():
             store.delete_dataset("demo")
     except Exception:  # noqa
         pass
+    threading.Thread(target=_warm_default_view, daemon=True).start()
     if AUTOSYNC_HOURS > 0 and firms.key_configured():
         AUTOSYNC["enabled"] = True
         threading.Thread(target=_autosync_loop, daemon=True).start()
@@ -112,6 +114,81 @@ def _json(obj):
 # --------------------------------------------------------------------------- harmonisation cache
 _hcache: dict[str, tuple] = {}
 _hlock = threading.Lock()
+
+# --------------------------------------------------------------------------- response cache
+# Finished responses for identical requests (same filters + parameters) are served from memory.
+# Cleared whenever the data changes (upload, sync, delete), so results are never stale.
+_rcache: dict[str, tuple[bytes, dict]] = {}
+
+
+def _num(o):
+    """Normalise numbers so 3 and 3.0 give the same cache key."""
+    if isinstance(o, bool) or o is None:
+        return o
+    if isinstance(o, (int, float)):
+        return float(o)
+    if isinstance(o, dict):
+        return {k: _num(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_num(v) for v in o]
+    return o
+
+
+def _rkey(name: str, body: dict) -> str:
+    f = store.Filters.from_dict(body.get("filters"))
+    p = HarmonizationParams.from_dict(body.get("params"))
+    rest = {k: v for k, v in body.items() if k not in ("filters", "params")}
+    return "|".join([name, f.key(), json.dumps(_num(dict(p.__dict__)), sort_keys=True, default=str), json.dumps(_num(rest), sort_keys=True, default=str)])
+
+
+def cached(fn):
+    @functools.wraps(fn)
+    def wrapper(body: dict = Body(...)):
+        try:
+            k = _rkey(fn.__name__, body)
+        except Exception:  # noqa
+            return fn(body)
+        hit = _rcache.get(k)
+        if hit is not None:
+            return Response(content=hit[0], media_type="application/json", headers=hit[1])
+        r = fn(body)
+        if getattr(r, "status_code", 200) == 200 and hasattr(r, "body"):
+            if len(_rcache) >= 60:
+                _rcache.pop(next(iter(_rcache)))
+            _rcache[k] = (bytes(r.body), {"X-Content-Bytes": str(len(r.body))})
+        return r
+    return wrapper
+
+
+def _clear_caches():
+    with _hlock:
+        _hcache.clear()
+    _rcache.clear()
+
+
+def _warm_default_view():
+    """Pre-compute the home page (whole world, last 90 days of data) so the first visitor gets it instantly."""
+    try:
+        lasts = [str(d["last_date"])[:10] for d in store.dataset_summary()
+                 if d["dataset"] == "live" and str(d["last_date"]) not in ("NaT", "None")]
+        if not lasts:
+            return
+        end = date.fromisoformat(max(lasts))
+        start = end - timedelta(days=89)
+        body = {"filters": {"dataset": "live", "start": str(start), "end": str(end), "sensors": ["MODIS", "VIIRS"],
+                            "product": "all", "min_conf": "nominal", "aoi": {"kind": "world"}, "exclude_static": True},
+                "params": {}}
+        points(body)
+        summary(body)
+        # Argentina (the challenge author's country, full 2000-today record): pre-compute its analysis pages too
+        arg = {"filters": {**body["filters"], "aoi": {"kind": "country", "country": "Argentina"}}, "params": {}}
+        for fn in (points, summary, calendar, harmonization, anomalies):
+            try:
+                fn(arg)
+            except Exception:  # noqa
+                pass
+    except Exception:  # noqa
+        pass
 
 
 LARGE_AOI_KM2 = 40_000_000  # larger areas (e.g. the whole globe) are analysed for the selected period only
@@ -231,6 +308,7 @@ def geocode(q: str):
 
 # --------------------------------------------------------------------------- analytics endpoints
 @app.post("/api/summary")
+@cached
 def summary(body: dict = Body(...)):
     f, p, raw_all, raw, hr, _ = _ctx(body)
     out = analytics.summary(raw, hr, f.start, f.end)
@@ -241,6 +319,7 @@ def summary(body: dict = Body(...)):
 
 
 @app.post("/api/harmonization")
+@cached
 def harmonization(body: dict = Body(...)):
     f, p, raw_all, raw, hr, _ = _ctx(body)
     mon = hr.monthly[["date", "modis_det", "viirs_det", "naive_sum", "modis_cd", "viirs_cd", "union_cd",
@@ -276,6 +355,7 @@ def harmonization_sensitivity(body: dict = Body(...)):
 
 
 @app.post("/api/calendar")
+@cached
 def calendar(body: dict = Body(...)):
     f, p, raw_all, raw, hr, _ = _ctx(body)
     return _json(analytics.calendar(hr, f.start, f.end, body.get("metric", "harmonized")))
@@ -288,12 +368,14 @@ def calendar_day(body: dict = Body(...)):
 
 
 @app.post("/api/history")
+@cached
 def history(body: dict = Body(...)):
     f, p, raw_all, raw, hr, _ = _ctx(body)
     return _json(analytics.history(raw_all, hr, body.get("compare")))
 
 
 @app.post("/api/recurrence")
+@cached
 def recurrence(body: dict = Body(...)):
     f, p, raw_all, raw, hr, _ = _ctx(body)
     aoi = AOI(f.aoi)
@@ -305,6 +387,7 @@ def recurrence(body: dict = Body(...)):
 
 
 @app.post("/api/anomalies")
+@cached
 def anomalies(body: dict = Body(...)):
     f, p, raw_all, raw, hr, _ = _ctx(body)
     a = body.get("anomaly", {})
@@ -314,6 +397,7 @@ def anomalies(body: dict = Body(...)):
 
 
 @app.post("/api/points")
+@cached
 def points(body: dict = Body(...)):
     """Hotspots for the map (server-side filtered; random sample above the cap, with the true count reported)."""
     f, p, raw_all, raw, hr, m = _ctx(body)
@@ -342,6 +426,7 @@ def points(body: dict = Body(...)):
 
 
 @app.post("/api/density")
+@cached
 def density(body: dict = Body(...)):
     """Gridded harmonised density: union cell-days per coarse cell (pre-VIIRS MODIS scaled by the calibration ratio)."""
     f, p, raw_all, raw, hr, m = _ctx(body)
@@ -446,8 +531,7 @@ async def ingest_upload(file: UploadFile = File(...), product: str = Form("")):
                                  f"Upload the fire_archive_*.csv / fire_nrt_*.csv files from the NASA download.")
     norm, rep = normalize(raw, source=f"UPLOAD:{file.filename}", product=product or f"UPLOAD_{kind.upper()}", dataset="live")
     added = store.insert(norm)
-    with _hlock:
-        _hcache.clear()
+    _clear_caches()
     store.log_sync({"id": f"up{int(time.time())}", "started_at": datetime.utcnow(), "finished_at": datetime.utcnow(),
                     "kind": "upload", "status": "done", "params": {"file": file.filename}, "rows_added": added,
                     "message": "; ".join(rep.notes)})
@@ -474,8 +558,7 @@ def sync_firms(body: dict = Body(...)):
                                         body.get("sensors", ["MODIS", "VIIRS"]))
     except Exception as e:  # noqa
         raise HTTPException(400, str(e))
-    with _hlock:
-        _hcache.clear()
+    _clear_caches()
     return {"job_id": jid}
 
 
@@ -485,8 +568,7 @@ def job(job_id: str):
     if not j:
         raise HTTPException(404, "unknown job")
     if j.get("status") in ("done", "failed"):
-        with _hlock:
-            _hcache.clear()
+        _clear_caches()
     return _json(j)
 
 
@@ -500,8 +582,7 @@ def delete_dataset(name: str):
     if name != "live":
         raise HTTPException(400, "unknown dataset")
     store.delete_dataset(name)
-    with _hlock:
-        _hcache.clear()
+    _clear_caches()
     return {"deleted": name}
 
 
